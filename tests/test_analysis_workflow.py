@@ -76,11 +76,23 @@ def test_full_clinical_pipeline_builds_expected_hypertension_features(
     assert loads["encounters"].records_upserted == 7
     assert loads["diagnoses"].records_upserted == 6
     assert loads["observations"].records_upserted == 13
+    assert loads["medications"].records_upserted == 6
+    assert loads["procedures"].records_upserted == 6
     assert cohort.row_count == 2
     assert feature_rows == [
         ("P001", 146.0, 92.0, 95),
         ("P002", 151.0, 96.0, 37),
     ]
+
+    entity_counts = connection.execute(
+        """
+        SELECT 'medications', COUNT(*) FROM clinical.medications
+        UNION ALL
+        SELECT 'procedures', COUNT(*) FROM clinical.procedures
+        ORDER BY 1
+        """
+    ).fetchall()
+    assert entity_counts == [("medications", 6), ("procedures", 6)]
 
     with cohort.features_path.open(encoding="utf-8", newline="") as file:
         exported = list(csv.DictReader(file))
