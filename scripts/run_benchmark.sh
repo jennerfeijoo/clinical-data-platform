@@ -8,6 +8,7 @@ python -m pip install -e '.[dev]'
 docker compose up -d postgres
 
 clinical-data-benchmark \
+  --allow-destructive-reset \
   --patients 250 1000 2500 \
   --repetitions 5 \
   --warmups 1 \
