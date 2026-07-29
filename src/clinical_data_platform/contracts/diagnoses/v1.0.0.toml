@@ -1,0 +1,49 @@
+[dataset]
+name = "diagnoses"
+version = "1.0.0"
+primary_key = "diagnosis_id"
+patient_id_column = "patient_id"
+allow_extra_columns = false
+
+[[columns]]
+name = "diagnosis_id"
+type = "string"
+required = true
+unique = true
+
+[[columns]]
+name = "patient_id"
+type = "string"
+required = true
+unique = false
+
+[[columns]]
+name = "encounter_id"
+type = "string"
+required = true
+unique = false
+
+[[columns]]
+name = "code_system"
+type = "string"
+required = true
+unique = false
+allowed_values = ["ICD10", "SNOMED"]
+
+[[columns]]
+name = "diagnosis_code"
+type = "string"
+required = true
+unique = false
+
+[[columns]]
+name = "diagnosis_datetime"
+type = "datetime"
+required = true
+unique = false
+
+[[columns]]
+name = "source_system"
+type = "string"
+required = true
+unique = false
