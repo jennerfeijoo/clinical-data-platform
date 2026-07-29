@@ -54,7 +54,10 @@ def test_pipeline_accepts_new_registry_entry_without_code_changes(
         source_sha256: str,
     ) -> list[tuple[object, ...]]:
         del run_id, source_sha256
-        return [(record["lab_id"], record["patient_id"], float(record["value"])) for record in records]
+        return [
+            (record["lab_id"], record["patient_id"], float(record["value"]))
+            for record in records
+        ]
 
     definition = DatasetDefinition(
         name="labs",
