@@ -12,8 +12,14 @@ FULL_SHA_ACTION = re.compile(r"^\s*uses:\s+[^\s@]+@([0-9a-f]{40})(?:\s+#.*)?$")
 
 def test_all_github_actions_are_pinned_to_full_commit_shas() -> None:
     action_lines: list[tuple[Path, int, str]] = []
+    workflow_paths = sorted(
+        [
+            *WORKFLOW_DIRECTORY.glob("*.yml"),
+            *WORKFLOW_DIRECTORY.glob("*.yaml"),
+        ]
+    )
 
-    for workflow_path in sorted(WORKFLOW_DIRECTORY.glob("*.yml")):
+    for workflow_path in workflow_paths:
         for line_number, line in enumerate(
             workflow_path.read_text(encoding="utf-8").splitlines(), start=1
         ):
@@ -44,6 +50,8 @@ def test_security_workflow_contains_independent_required_scanners() -> None:
 
     required_controls = (
         "python -m pip_audit",
+        "audit_status=0",
+        "sbom_status=0",
         "python -m bandit",
         "security/bandit-baseline.json",
         "github/codeql-action/init@",
