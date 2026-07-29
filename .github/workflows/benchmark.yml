@@ -1,0 +1,85 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/benchmark.yml"
+      - "src/clinical_data_platform/benchmark.py"
+      - "src/clinical_data_platform/benchmark_cli.py"
+      - "src/clinical_data_platform/bulk.py"
+      - "src/clinical_data_platform/registry.py"
+      - "pyproject.toml"
+      - "tests/test_benchmark.py"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/benchmark.yml"
+      - "src/clinical_data_platform/benchmark.py"
+      - "src/clinical_data_platform/benchmark_cli.py"
+      - "src/clinical_data_platform/bulk.py"
+      - "src/clinical_data_platform/registry.py"
+      - "pyproject.toml"
+
+permissions:
+  contents: read
+
+jobs:
+  governed-loading:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DATABASE_URL: postgresql://clinical_user:clinical_password@localhost:5432/clinical_data
+      PYTHONHASHSEED: "0"
+      TZ: UTC
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: clinical_data
+          POSTGRES_USER: clinical_user
+          POSTGRES_PASSWORD: clinical_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U clinical_user -d clinical_data"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run governed loading benchmark
+        run: |
+          OUTPUT="$RUNNER_TEMP/loading-benchmark"
+          clinical-data-benchmark \
+            --allow-destructive-reset \
+            --patients 250 1000 2500 \
+            --repetitions 6 \
+            --warmups 1 \
+            --seed 20260729 \
+            --output-dir "$OUTPUT"
+          cat "$OUTPUT/benchmark-summary.md"
+          cat "$OUTPUT/benchmark-summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: governed-loading-benchmark
+          path: ${{ runner.temp }}/loading-benchmark
+          if-no-files-found: error
+          retention-days: 30

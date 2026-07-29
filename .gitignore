@@ -14,5 +14,6 @@ dist/
 data/processed/
 data/analytics/
 data/synthea/
+data/benchmarks/
 .DS_Store
 Thumbs.db

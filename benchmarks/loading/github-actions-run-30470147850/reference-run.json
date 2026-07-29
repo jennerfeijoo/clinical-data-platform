@@ -1,0 +1,270 @@
+{
+  "aggregates": [
+    {
+      "dataset_median_elapsed_ms": {
+        "diagnoses": 119.0593655,
+        "encounters": 60.2115965,
+        "medications": 123.3821765,
+        "observations": 350.926462,
+        "patients": 46.4441225,
+        "procedures": 119.4954505
+      },
+      "maximum_elapsed_ms": 963.098937,
+      "mean_elapsed_ms": 846.5200283333334,
+      "median_elapsed_ms": 825.6936345,
+      "median_rows_per_second": 4541.8433968914715,
+      "method": "copy",
+      "minimum_elapsed_ms": 791.260268,
+      "patient_count": 250,
+      "repetitions": 6,
+      "stdev_elapsed_ms": 61.131279113724524,
+      "total_rows": 3750
+    },
+    {
+      "dataset_median_elapsed_ms": {
+        "diagnoses": 146.4445245,
+        "encounters": 85.726294,
+        "medications": 178.1431665,
+        "observations": 461.23352650000004,
+        "patients": 58.105838500000004,
+        "procedures": 153.3438095
+      },
+      "maximum_elapsed_ms": 1093.184305,
+      "mean_elapsed_ms": 1078.5279828333332,
+      "median_elapsed_ms": 1083.0283639999998,
+      "median_rows_per_second": 3462.6127861572168,
+      "method": "executemany",
+      "minimum_elapsed_ms": 1056.377199,
+      "patient_count": 250,
+      "repetitions": 6,
+      "stdev_elapsed_ms": 15.83042786850962,
+      "total_rows": 3750
+    },
+    {
+      "dataset_median_elapsed_ms": {
+        "diagnoses": 455.9122085,
+        "encounters": 225.630398,
+        "medications": 477.906812,
+        "observations": 1381.4628175,
+        "patients": 167.0427875,
+        "procedures": 464.782638
+      },
+      "maximum_elapsed_ms": 3205.134928,
+      "mean_elapsed_ms": 3163.5046093333335,
+      "median_elapsed_ms": 3183.670676,
+      "median_rows_per_second": 4711.54329656582,
+      "method": "copy",
+      "minimum_elapsed_ms": 3038.401001,
+      "patient_count": 1000,
+      "repetitions": 6,
+      "stdev_elapsed_ms": 61.933000386855824,
+      "total_rows": 15000
+    },
+    {
+      "dataset_median_elapsed_ms": {
+        "diagnoses": 578.962606,
+        "encounters": 338.728426,
+        "medications": 717.7293605,
+        "observations": 1837.8541825,
+        "patients": 231.238945,
+        "procedures": 619.166531
+      },
+      "maximum_elapsed_ms": 4373.180849,
+      "mean_elapsed_ms": 4308.203450833334,
+      "median_elapsed_ms": 4341.867036,
+      "median_rows_per_second": 3454.764305146998,
+      "method": "executemany",
+      "minimum_elapsed_ms": 4189.997002,
+      "patient_count": 1000,
+      "repetitions": 6,
+      "stdev_elapsed_ms": 73.3478410126224,
+      "total_rows": 15000
+    },
+    {
+      "dataset_median_elapsed_ms": {
+        "diagnoses": 1134.3145755,
+        "encounters": 565.9223965,
+        "medications": 1196.3484039999998,
+        "observations": 3467.419443,
+        "patients": 412.74389399999995,
+        "procedures": 1150.883204
+      },
+      "maximum_elapsed_ms": 7970.342418,
+      "mean_elapsed_ms": 7876.7814175,
+      "median_elapsed_ms": 7936.443761500001,
+      "median_rows_per_second": 4725.045171320117,
+      "method": "copy",
+      "minimum_elapsed_ms": 7559.864182,
+      "patient_count": 2500,
+      "repetitions": 6,
+      "stdev_elapsed_ms": 158.2771981347709,
+      "total_rows": 37500
+    },
+    {
+      "dataset_median_elapsed_ms": {
+        "diagnoses": 1456.5788069999999,
+        "encounters": 850.066767,
+        "medications": 1829.218864,
+        "observations": 4608.235343,
+        "patients": 626.2316350000001,
+        "procedures": 1579.104239
+      },
+      "maximum_elapsed_ms": 11063.773974,
+      "mean_elapsed_ms": 10882.849610166666,
+      "median_elapsed_ms": 10955.5407115,
+      "median_rows_per_second": 3422.9316692082,
+      "method": "executemany",
+      "minimum_elapsed_ms": 10616.640453,
+      "patient_count": 2500,
+      "repetitions": 6,
+      "stdev_elapsed_ms": 184.80373949915122,
+      "total_rows": 37500
+    }
+  ],
+  "comparisons": [
+    {
+      "copy_median_elapsed_ms": 825.6936345,
+      "copy_speedup": 1.3116588511134994,
+      "elapsed_reduction_percent": 23.76066389891889,
+      "executemany_median_elapsed_ms": 1083.0283639999998,
+      "patient_count": 250,
+      "total_rows": 3750
+    },
+    {
+      "copy_median_elapsed_ms": 3183.670676,
+      "copy_speedup": 1.36379276560576,
+      "elapsed_reduction_percent": 26.675076652439422,
+      "executemany_median_elapsed_ms": 4341.867036,
+      "patient_count": 1000,
+      "total_rows": 15000
+    },
+    {
+      "copy_median_elapsed_ms": 7936.443761500001,
+      "copy_speedup": 1.3804092917089335,
+      "elapsed_reduction_percent": 27.557717409884308,
+      "executemany_median_elapsed_ms": 10955.5407115,
+      "patient_count": 2500,
+      "total_rows": 37500
+    }
+  ],
+  "configuration": {
+    "method_order_policy": "alternating_ab_ba",
+    "methods": [
+      "copy",
+      "executemany"
+    ],
+    "patient_counts": [
+      250,
+      1000,
+      2500
+    ],
+    "reference_date": "2026-07-29",
+    "repetitions": 6,
+    "seed": 20260729,
+    "warmups": 1
+  },
+  "environment": {
+    "cpu_model": "AMD EPYC 7763 64-Core Processor",
+    "git_commit": "6a16037674386d7c33ca811ecff5a9dd02f19b14",
+    "github_run_id": "30470147850",
+    "github_runner_name": "GitHub Actions 1000008163",
+    "logical_cpu_count": 4,
+    "machine": "x86_64",
+    "operating_system": "Linux-6.17.0-1020-azure-x86_64-with-glibc2.39",
+    "package_version": "0.14.0",
+    "physical_memory_bytes": 16766418944,
+    "postgresql_settings": {
+      "fsync": "on",
+      "full_page_writes": "on",
+      "shared_buffers": "128MB",
+      "synchronous_commit": "on",
+      "wal_level": "replica"
+    },
+    "postgresql_version": "16.14",
+    "python_implementation": "CPython",
+    "python_version": "3.11.15"
+  },
+  "evidence": {
+    "artifact_created_at": "2026-07-29T16:22:48Z",
+    "artifact_digest": "sha256:89b3a915252096bbe9b1ba3ccc02b88d73c34b8cb7a8dafff5faeb1a48bc00fa",
+    "artifact_id": "8731378490",
+    "artifact_name": "governed-loading-benchmark",
+    "source_report_sha256": "4455b7f4de1b9961a0d2bf5bddfdd3a55bb647909b07a4e33a4b142ecd79f52c",
+    "source_summary_sha256": "750eab5c33634bd0771f57400f374fd6ab38ec83c0f98e1ad017e024beedb475",
+    "source_trials_sha256": "3c569f8195de9bf13c30b3b5c4140030c20e620c8406e628e99a729b088f9a08",
+    "workflow_head_sha": "e265dc00413688752ce652ef26a3b324bc3564c2",
+    "workflow_name": "Benchmark",
+    "workflow_run_id": "30470147850"
+  },
+  "generated_at": "2026-07-29T16:22:46.849797Z",
+  "limitations": [
+    "environment_specific",
+    "shared_runner_variability",
+    "initial_load_only",
+    "single_writer",
+    "descriptive_statistics_only",
+    "no_peak_memory_claim"
+  ],
+  "measurement_scope": {
+    "excluded": [
+      "workload generation",
+      "immutable raw capture",
+      "contract validation",
+      "full durable pipeline audit lifecycle",
+      "post-load verification queries"
+    ],
+    "included": [
+      "contract row conversion",
+      "driver transfer",
+      "temporary staging for COPY",
+      "set-based merge or executemany upsert",
+      "clinical triggers and constraints",
+      "transaction commit"
+    ]
+  },
+  "schema_version": "1.0.0",
+  "workloads": [
+    {
+      "fingerprint": "75ec4629b209e403752991878e57dfa546605d1b8954a71ca8845417f84bca61",
+      "patient_count": 250,
+      "row_counts": {
+        "diagnoses": 500,
+        "encounters": 500,
+        "medications": 500,
+        "observations": 1500,
+        "patients": 250,
+        "procedures": 500
+      },
+      "seed": 20260729,
+      "total_rows": 3750
+    },
+    {
+      "fingerprint": "f94c3726aa7c95b53da035b807c12f6dae70455bafad7e2e334621b43956ccea",
+      "patient_count": 1000,
+      "row_counts": {
+        "diagnoses": 2000,
+        "encounters": 2000,
+        "medications": 2000,
+        "observations": 6000,
+        "patients": 1000,
+        "procedures": 2000
+      },
+      "seed": 20260729,
+      "total_rows": 15000
+    },
+    {
+      "fingerprint": "fc6e01c7309147a1eab076d86834970ebcd19446a904fdb8b6ec0aa1fc79194f",
+      "patient_count": 2500,
+      "row_counts": {
+        "diagnoses": 5000,
+        "encounters": 5000,
+        "medications": 5000,
+        "observations": 15000,
+        "patients": 2500,
+        "procedures": 5000
+      },
+      "seed": 20260729,
+      "total_rows": 37500
+    }
+  ]
+}
