@@ -9,11 +9,10 @@ from clinical_data_platform.cohort import build_hypertension_cohort
 from clinical_data_platform.database import (
     apply_schema,
     connect_database,
-    persist_patient_validation_outputs,
+    persist_dataset_validation_outputs,
 )
-from clinical_data_platform.entity_database import persist_entity_validation_outputs
-from clinical_data_platform.entity_pipeline import run_entity_validation
-from clinical_data_platform.pipeline import run_patient_validation
+from clinical_data_platform.pipeline import run_dataset_validation
+from clinical_data_platform.registry import dataset_names
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_DIRECTORY = REPOSITORY_ROOT / "data" / "sample"
@@ -29,18 +28,15 @@ def test_full_clinical_pipeline_builds_expected_hypertension_features(
 ) -> None:
     assert DATABASE_URL is not None
     processed = tmp_path / "processed"
-    patient_summary = run_patient_validation(
-        SAMPLE_DIRECTORY / "patients.csv",
-        processed / "patients",
-        reference_date=date(2026, 7, 29),
-    )
-    for dataset in ("encounters", "diagnoses", "observations"):
-        run_entity_validation(
+    summaries = {
+        dataset: run_dataset_validation(
             dataset,
             SAMPLE_DIRECTORY / f"{dataset}.csv",
             processed / dataset,
             reference_date=date(2026, 7, 29),
         )
+        for dataset in dataset_names()
+    }
 
     with connect_database(DATABASE_URL) as connection:
         apply_schema(connection, SCHEMA_PATH)
@@ -61,25 +57,14 @@ def test_full_clinical_pipeline_builds_expected_hypertension_features(
         )
         connection.commit()
 
-        patient_load = persist_patient_validation_outputs(
-            connection,
-            processed / "patients",
-        )
-        encounter_load = persist_entity_validation_outputs(
-            connection,
-            "encounters",
-            processed / "encounters",
-        )
-        diagnosis_load = persist_entity_validation_outputs(
-            connection,
-            "diagnoses",
-            processed / "diagnoses",
-        )
-        observation_load = persist_entity_validation_outputs(
-            connection,
-            "observations",
-            processed / "observations",
-        )
+        loads = {
+            dataset: persist_dataset_validation_outputs(
+                connection,
+                dataset,
+                processed / dataset,
+            )
+            for dataset in dataset_names()
+        }
         cohort = build_hypertension_cohort(
             connection,
             COHORT_SQL_PATH,
@@ -100,11 +85,11 @@ def test_full_clinical_pipeline_builds_expected_hypertension_features(
             (cohort.cohort_run_id,),
         ).fetchall()
 
-    assert patient_load.run_id == patient_summary.run_id
-    assert patient_load.patients_upserted == 5
-    assert encounter_load.records_upserted == 7
-    assert diagnosis_load.records_upserted == 6
-    assert observation_load.records_upserted == 13
+    assert loads["patients"].run_id == summaries["patients"].run_id
+    assert loads["patients"].records_upserted == 5
+    assert loads["encounters"].records_upserted == 7
+    assert loads["diagnoses"].records_upserted == 6
+    assert loads["observations"].records_upserted == 13
     assert cohort.row_count == 2
     assert feature_rows == [
         ("P001", 146.0, 92.0, 95),
