@@ -18,6 +18,7 @@ docker compose up -d postgres
 $patientArguments = $Patients | ForEach-Object { $_.ToString() }
 
 & clinical-data-benchmark `
+    --allow-destructive-reset `
     --patients @patientArguments `
     --repetitions $Repetitions `
     --warmups $Warmups `
