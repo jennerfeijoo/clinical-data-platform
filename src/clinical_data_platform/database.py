@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -30,6 +31,16 @@ from clinical_data_platform.run_audit import (
     fail_loading_attempt,
     register_validated_run,
 )
+from clinical_data_platform.structured_logging import (
+    bind_log_context,
+    emit_log,
+    ensure_correlation_id,
+    get_logger,
+    log_operation,
+    safe_exception_fields,
+)
+
+LOGGER = get_logger("database")
 
 
 class DatabaseConfigurationError(RuntimeError):
@@ -96,7 +107,7 @@ def database_url_from_environment() -> str:
 
 
 def connect_database(database_url: str) -> psycopg.Connection[Any]:
-    """Open a PostgreSQL connection."""
+    """Open a PostgreSQL connection without logging its credentials."""
     return psycopg.connect(database_url)
 
 
@@ -300,133 +311,234 @@ def persist_dataset_validation_outputs(
 ) -> DatasetPersistenceSummary:
     """Load one verified dataset while durably auditing every loading attempt."""
     definition = get_dataset_definition(dataset)
-    report = _read_quality_report(output_directory / "quality_report.json")
-    valid_records = read_csv_records(output_directory / f"valid_{dataset}.csv")
-    invalid_records = read_csv_records(output_directory / f"invalid_{dataset}.csv")
-    validation_errors = read_csv_records(output_directory / "validation_errors.csv")
-    _validate_output_counts(report, valid_records, invalid_records, validation_errors)
 
-    if report["dataset"] != dataset:
-        raise PersistenceError(
-            f"Quality report contains {report['dataset']!r}, expected {dataset!r}."
-        )
-    for field in (
-        "input_sha256",
-        "raw_manifest_sha256",
-        "contract_sha256",
-        "execution_journal_head_sha256",
-    ):
-        if len(report[field]) != 64:
-            raise PersistenceError(f"{field} must contain 64 hexadecimal characters.")
-    _validate_contract_lineage(report, dataset)
-    _validate_raw_lineage(report, dataset, raw_root)
-    journal = _validate_execution_journal(report, dataset, output_directory)
-
-    try:
-        run_id = UUID(report["run_id"])
-        raw_receipt_id = UUID(report["raw_receipt_id"])
-        generated_at = datetime.fromisoformat(report["generated_at"])
-        raw_received_at = datetime.fromisoformat(report["raw_received_at"])
-        reference_date = date.fromisoformat(report["reference_date"])
-    except ValueError as exc:
-        raise PersistenceError("The quality report contains an invalid UUID or date.") from exc
-
-    try:
-        register_validated_run(
-            connection,
-            _registration(
-                report,
-                run_id,
-                raw_receipt_id,
-                generated_at,
-                raw_received_at,
-                reference_date,
-            ),
-            journal,
-        )
-        attempt = begin_loading_attempt(connection, run_id)
-    except RunAuditError as exc:
-        raise PersistenceError("Pipeline execution audit could not begin loading.") from exc
-
-    if attempt.already_completed:
-        return DatasetPersistenceSummary(
-            run_id=run_id,
+    with ensure_correlation_id():
+        with log_operation(
+            LOGGER,
+            "persistence.preflight",
+            operation="verify_validation_outputs",
+            stage="preflight",
             dataset=dataset,
-            contract_version=report["contract_version"],
-            already_loaded=True,
-            attempt_number=attempt.attempt_number,
-            final_status="completed",
-            records_upserted=0,
-            validation_errors_inserted=0,
-        )
-
-    try:
-        record_values = definition.row_builder(
-            valid_records,
-            run_id,
-            report["input_sha256"],
-        )
-        error_values = [
-            (
-                run_id,
-                int(error["row_number"]),
-                error["entity_id"] or None,
-                error["patient_id"] or None,
-                error["field"],
-                error["rule"],
-                error["message"],
-                error["value"] or None,
+        ) as preflight_log:
+            report = _read_quality_report(output_directory / "quality_report.json")
+            valid_records = read_csv_records(output_directory / f"valid_{dataset}.csv")
+            invalid_records = read_csv_records(output_directory / f"invalid_{dataset}.csv")
+            validation_errors = read_csv_records(
+                output_directory / "validation_errors.csv"
             )
-            for error in validation_errors
-        ]
+            _validate_output_counts(
+                report,
+                valid_records,
+                invalid_records,
+                validation_errors,
+            )
 
-        with connection.transaction():
-            if record_values:
-                with connection.cursor() as cursor:
-                    cursor.executemany(definition.upsert_sql, record_values)
-            if error_values:
-                with connection.cursor() as cursor:
-                    cursor.executemany(
-                        """
-                        INSERT INTO audit.validation_errors (
-                            run_id, row_number, entity_id, patient_id,
-                            field_name, rule_name, message, rejected_value
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        error_values,
+            if report["dataset"] != dataset:
+                raise PersistenceError(
+                    f"Quality report contains {report['dataset']!r}, expected {dataset!r}."
+                )
+            for field in (
+                "input_sha256",
+                "raw_manifest_sha256",
+                "contract_sha256",
+                "execution_journal_head_sha256",
+            ):
+                if len(report[field]) != 64:
+                    raise PersistenceError(
+                        f"{field} must contain 64 hexadecimal characters."
                     )
-            complete_loading_attempt(
-                connection,
-                run_id,
-                attempt.attempt_number,
+            _validate_contract_lineage(report, dataset)
+            _validate_raw_lineage(report, dataset, raw_root)
+            journal = _validate_execution_journal(report, dataset, output_directory)
+
+            try:
+                run_id = UUID(report["run_id"])
+                raw_receipt_id = UUID(report["raw_receipt_id"])
+                generated_at = datetime.fromisoformat(report["generated_at"])
+                raw_received_at = datetime.fromisoformat(report["raw_received_at"])
+                reference_date = date.fromisoformat(report["reference_date"])
+            except ValueError as exc:
+                raise PersistenceError(
+                    "The quality report contains an invalid UUID or date."
+                ) from exc
+
+            preflight_log.update(
+                {
+                    "run_id": str(run_id),
+                    "rows_valid": len(valid_records),
+                    "rows_invalid": len(invalid_records),
+                    "validation_errors": len(validation_errors),
+                    "contract_version": report["contract_version"],
+                }
+            )
+
+        with bind_log_context(run_id=str(run_id), dataset=dataset):
+            emit_log(
+                LOGGER,
+                logging.INFO,
+                "persistence.run.started",
+                "Started dataset persistence run.",
+                stage="audit_registration",
+                rows_valid=len(valid_records),
+                validation_errors=len(validation_errors),
+            )
+            try:
+                with log_operation(
+                    LOGGER,
+                    "persistence.audit_registration",
+                    operation="register_validated_run",
+                    stage="audit_registration",
+                ) as registration_log:
+                    register_validated_run(
+                        connection,
+                        _registration(
+                            report,
+                            run_id,
+                            raw_receipt_id,
+                            generated_at,
+                            raw_received_at,
+                            reference_date,
+                        ),
+                        journal,
+                    )
+                    attempt = begin_loading_attempt(connection, run_id)
+                    registration_log["attempt_number"] = attempt.attempt_number
+                    registration_log["already_completed"] = attempt.already_completed
+            except RunAuditError as exc:
+                raise PersistenceError(
+                    "Pipeline execution audit could not begin loading."
+                ) from exc
+
+            if attempt.already_completed:
+                emit_log(
+                    LOGGER,
+                    logging.INFO,
+                    "persistence.run.idempotent",
+                    "Dataset run was already completed; no rows were written.",
+                    stage="persistence",
+                    status="completed",
+                    attempt_number=attempt.attempt_number,
+                    already_loaded=True,
+                )
+                return DatasetPersistenceSummary(
+                    run_id=run_id,
+                    dataset=dataset,
+                    contract_version=report["contract_version"],
+                    already_loaded=True,
+                    attempt_number=attempt.attempt_number,
+                    final_status="completed",
+                    records_upserted=0,
+                    validation_errors_inserted=0,
+                )
+
+            try:
+                record_values = definition.row_builder(
+                    valid_records,
+                    run_id,
+                    report["input_sha256"],
+                )
+                error_values = [
+                    (
+                        run_id,
+                        int(error["row_number"]),
+                        error["entity_id"] or None,
+                        error["patient_id"] or None,
+                        error["field"],
+                        error["rule"],
+                        error["message"],
+                        error["value"] or None,
+                    )
+                    for error in validation_errors
+                ]
+
+                with log_operation(
+                    LOGGER,
+                    "persistence.transaction",
+                    operation="persist_clinical_dataset",
+                    stage="persistence",
+                    attempt_number=attempt.attempt_number,
+                    records_attempted=len(record_values),
+                    validation_errors_attempted=len(error_values),
+                ) as transaction_log:
+                    with connection.transaction():
+                        if record_values:
+                            with connection.cursor() as cursor:
+                                cursor.executemany(definition.upsert_sql, record_values)
+                        if error_values:
+                            with connection.cursor() as cursor:
+                                cursor.executemany(
+                                    """
+                                    INSERT INTO audit.validation_errors (
+                                        run_id, row_number, entity_id, patient_id,
+                                        field_name, rule_name, message, rejected_value
+                                    )
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                    """,
+                                    error_values,
+                                )
+                        complete_loading_attempt(
+                            connection,
+                            run_id,
+                            attempt.attempt_number,
+                            records_persisted=len(record_values),
+                            validation_errors_persisted=len(error_values),
+                        )
+                    transaction_log["records_persisted"] = len(record_values)
+                    transaction_log["validation_errors_persisted"] = len(error_values)
+            except Exception as exc:
+                try:
+                    fail_loading_attempt(
+                        connection,
+                        run_id,
+                        attempt.attempt_number,
+                        exc,
+                        details={
+                            "dataset": dataset,
+                            "records_attempted": len(valid_records),
+                            "validation_errors_attempted": len(validation_errors),
+                        },
+                    )
+                    emit_log(
+                        LOGGER,
+                        logging.ERROR,
+                        "persistence.failure_audited",
+                        "Persisted durable failure state after clinical rollback.",
+                        stage="persistence",
+                        status="failed",
+                        attempt_number=attempt.attempt_number,
+                        **safe_exception_fields(exc),
+                    )
+                except Exception as audit_exc:
+                    emit_log(
+                        LOGGER,
+                        logging.CRITICAL,
+                        "persistence.failure_audit_failed",
+                        "Clinical rollback succeeded but durable failure audit failed.",
+                        stage="failure_audit",
+                        attempt_number=attempt.attempt_number,
+                        **safe_exception_fields(audit_exc),
+                    )
+                    exc.add_note(f"Failure audit could not be persisted: {audit_exc}")
+                raise
+
+            emit_log(
+                LOGGER,
+                logging.INFO,
+                "persistence.run.completed",
+                "Completed dataset persistence run.",
+                stage="completed",
+                status="completed",
+                attempt_number=attempt.attempt_number,
                 records_persisted=len(record_values),
                 validation_errors_persisted=len(error_values),
             )
-    except Exception as exc:
-        try:
-            fail_loading_attempt(
-                connection,
-                run_id,
-                attempt.attempt_number,
-                exc,
-                details={
-                    "dataset": dataset,
-                    "records_attempted": len(valid_records),
-                    "validation_errors_attempted": len(validation_errors),
-                },
+            return DatasetPersistenceSummary(
+                run_id=run_id,
+                dataset=dataset,
+                contract_version=report["contract_version"],
+                already_loaded=False,
+                attempt_number=attempt.attempt_number,
+                final_status="completed",
+                records_upserted=len(record_values),
+                validation_errors_inserted=len(error_values),
             )
-        except Exception as audit_exc:
-            exc.add_note(f"Failure audit could not be persisted: {audit_exc}")
-        raise
-
-    return DatasetPersistenceSummary(
-        run_id=run_id,
-        dataset=dataset,
-        contract_version=report["contract_version"],
-        already_loaded=False,
-        attempt_number=attempt.attempt_number,
-        final_status="completed",
-        records_upserted=len(record_values),
-        validation_errors_inserted=len(error_values),
-    )
