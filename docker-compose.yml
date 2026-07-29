@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-clinical_data}
+      POSTGRES_USER: ${POSTGRES_USER:-clinical_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-clinical_password}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-clinical_user} -d ${POSTGRES_DB:-clinical_data}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
