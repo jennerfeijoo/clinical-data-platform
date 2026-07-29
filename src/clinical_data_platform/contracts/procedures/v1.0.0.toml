@@ -1,0 +1,58 @@
+not_future_fields = ["procedure_datetime"]
+
+[dataset]
+name = "procedures"
+version = "1.0.0"
+primary_key = "procedure_id"
+patient_id_column = "patient_id"
+allow_extra_columns = false
+
+[[columns]]
+name = "procedure_id"
+type = "string"
+required = true
+unique = true
+
+[[columns]]
+name = "patient_id"
+type = "string"
+required = true
+unique = false
+
+[[columns]]
+name = "encounter_id"
+type = "string"
+required = true
+unique = false
+
+[[columns]]
+name = "code_system"
+type = "string"
+required = true
+unique = false
+allowed_values = ["SNOMED", "CPT", "ICD10PCS"]
+
+[[columns]]
+name = "procedure_code"
+type = "string"
+required = true
+unique = false
+
+[[columns]]
+name = "procedure_datetime"
+type = "datetime"
+required = true
+unique = false
+
+[[columns]]
+name = "status"
+type = "string"
+required = true
+unique = false
+allowed_values = ["COMPLETED", "IN_PROGRESS", "NOT_DONE"]
+
+[[columns]]
+name = "source_system"
+type = "string"
+required = true
+unique = false
