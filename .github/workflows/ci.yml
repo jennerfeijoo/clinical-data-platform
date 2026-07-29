@@ -34,10 +34,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.3.1
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.2.0
         with:
           python-version: "3.11"
           cache: pip
@@ -172,10 +172,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.3.1
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.2.0
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -190,7 +190,7 @@ jobs:
         env:
           EXPECTED_PYTHON: ${{ matrix.python-version }}
         run: |
-          python -c "import importlib.metadata, os, platform; expected=os.environ['EXPECTED_PYTHON']; assert platform.python_version().startswith(expected + '.'); assert importlib.metadata.version('clinical-data-platform') == '0.18.0'; print(platform.python_version())"
+          python -c "import importlib.metadata, os, platform; expected=os.environ['EXPECTED_PYTHON']; assert platform.python_version().startswith(expected + '.'); assert importlib.metadata.version('clinical-data-platform') == '0.19.0'; print(platform.python_version())"
 
       - name: Validate contracts and cohort profiles
         run: |
