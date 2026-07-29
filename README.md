@@ -1,6 +1,6 @@
 # Clinical Data Platform
 
-> Status: active development toward `1.0.0` — version `0.15.0` adds a second independently seeded, reproducible Synthea cohort with identifier-disjoint comparison and pair loading.
+> Status: active development toward `1.0.0` — version `0.16.0` adds reproducible, contract-aware attrition and missingness reports for two independently seeded Synthea cohorts.
 
 Clinical Data Platform is a synthetic clinical data engineering project that demonstrates how healthcare-like CSV sources become auditable, terminology-linked, analysis-ready datasets.
 
@@ -25,32 +25,23 @@ Generic validation pipeline
     ├── quarantined rows
     ├── normalized validation errors
     ├── quality report
-    └── hash-chained local execution journal
+    └── hash-chained execution journal
             │
             ▼
-Durable loading attempt
+PostgreSQL COPY → temporary typed staging
             │
             ▼
-Streaming type conversion
+Governed target merge
+    ├── terminology resolution
+    ├── record hashes
+    ├── patient SCD Type 2 history
+    ├── immutable-event guards
+    ├── foreign keys and checks
+    └── source-run lineage
             │
-            ▼
-PostgreSQL COPY FROM STDIN
-            │
-            ▼
-Temporary typed staging table
-            │
-            ▼
-INSERT ... SELECT ... ON CONFLICT
-            │
-            ├── terminology resolution
-            ├── record hashes
-            ├── patient SCD Type 2 history
-            ├── immutable-event guards
-            ├── foreign keys and checks
-            └── source-run lineage
-            │
-            ▼
-Versioned cohort SQL and feature export
+            ├── versioned analytical cohorts
+            ├── reproducible loading benchmark
+            └── paired attrition and missingness evidence
 ```
 
 Structured JSON logs observe operations. PostgreSQL stores authoritative execution states, ordered events, retries, and durable failure evidence.
@@ -59,7 +50,7 @@ There is no patient-specific pipeline, no Synthea-specific persistence path, no 
 
 ## Two reproducible Synthea cohorts
 
-Version `0.15.0` packages two matched-design Synthea profiles:
+The package contains two matched-design profiles:
 
 | Control | Cohort A | Cohort B |
 |---|---|---|
@@ -73,31 +64,16 @@ Version `0.15.0` packages two matched-design Synthea profiles:
 | Threads | 1 | 1 |
 | Retained history | complete | complete |
 
-The two profiles deliberately keep software version, geography, date, size, export scope, thread count, and retained history fixed. Only the patient and clinician seeds change. Cohort B is therefore an independent stochastic replica under the same controlled design.
+Software version, geography, date, size, export scope, thread count, and retained history remain fixed. Only the patient and clinician seeds change. Cohort B is therefore an independent stochastic replica under the same controlled design.
 
-Each cohort independently records and verifies:
-
-```text
-profile SHA-256
-resolved Synthea commit
-exact generation command
-six source CSV hashes and row counts
-source dataset fingerprint
-seven adapted output hashes
-adaptation fingerprint
-contract validity
-explicit omission counts
-terminology concept count
-```
-
-The pair comparison additionally requires:
+The pair comparison requires:
 
 ```text
 distinct profile hashes
 AND distinct random seeds
 AND distinct clinician seeds
 AND distinct adaptation fingerprints
-AND zero overlap in:
+AND zero overlap across:
     patient_id
     encounter_id
     diagnosis_id
@@ -106,21 +82,13 @@ AND zero overlap in:
     procedure_id
 ```
 
-A stable comparison fingerprint covers the controlled design, both profile identities, both adaptation fingerprints, row counts, omission counts, terminology counts, identifier counts, identifier-set fingerprints, and overlap counts. It excludes timestamps, absolute paths, and PostgreSQL run UUIDs.
-
 Generate and verify both cohorts:
 
 ```powershell
 .\scripts\generate_synthea_cohorts.ps1
 ```
 
-Load both through the governed pipeline:
-
-```powershell
-.\scripts\load_synthea_cohorts.ps1 -ReplaceComparison
-```
-
-Direct comparison:
+Compare them directly:
 
 ```powershell
 clinical-data-cohort compare `
@@ -129,21 +97,94 @@ clinical-data-cohort compare `
   --output-dir data/synthea/cohort-comparison
 ```
 
+Load both through the governed pipeline:
+
+```powershell
+.\scripts\load_synthea_cohorts.ps1 -ReplaceComparison
+```
+
 A complete pair load creates twelve separate completed pipeline runs:
 
 ```text
 6 datasets × 2 cohorts = 12 run_ids
 ```
 
-Before loading, the pair loader checks the target database for identifiers belonging to either cohort. Any collision causes refusal before new validation or persistence runs are created.
+Before loading, the pair loader checks PostgreSQL for identifiers belonging to either cohort. Any collision causes refusal before new validation or persistence runs are created.
 
 Technical protocol: [`docs/synthea-cohorts.md`](docs/synthea-cohorts.md).
 
-Spanish study guide: [`docs/learning/segunda-cohorte-synthea-es.md`](docs/learning/segunda-cohorte-synthea-es.md).
+Spanish guide: [`docs/learning/segunda-cohorte-synthea-es.md`](docs/learning/segunda-cohorte-synthea-es.md).
+
+## Attrition and missingness reports
+
+Version `0.16.0` converts the adaptation process into reproducible quality evidence:
+
+```text
+source rows
+→ adapted rows
+→ explicit omission reasons
+→ source-field missingness
+→ contract-aware adapted missingness
+→ row completeness
+→ descriptive A/B comparison
+→ stable quality fingerprint
+```
+
+Attrition means technical row exclusion during adaptation, not patient dropout or loss to follow-up.
+
+For every entity the report requires:
+
+```text
+source_rows = adapted_rows + omitted_rows
+```
+
+Adapted missingness is classified as:
+
+| Classification | Meaning |
+|---|---|
+| `required` | A blank value violates the active executable contract. |
+| `optional` | Absence is permitted and may represent a valid clinical state. |
+| `structural` | The current adapter does not receive a reliable structured source value. |
+
+Current structural fields are `medications.dose_value`, `medications.dose_unit`, and `medications.route`.
+
+Generate the report:
+
+```powershell
+.\scripts\report_synthea_quality.ps1
+```
+
+Direct command:
+
+```powershell
+clinical-data-cohort quality-report `
+  data/synthea/synthea-us-small-v1/normalized `
+  data/synthea/synthea-us-small-cohort-b-v1/normalized `
+  --output-dir data/synthea/cohort-quality
+```
+
+Artifacts:
+
+```text
+data/synthea/cohort-quality/
+├── synthea-quality-report.json
+├── synthea-quality-report.md
+├── attrition.csv
+├── attrition-reasons.csv
+├── source-missingness.csv
+├── adapted-missingness.csv
+├── row-completeness.csv
+├── cohort-quality-comparison.csv
+└── cohort-comparison/
+```
+
+The quality fingerprint covers the cohort comparison identity, profiles, adaptation fingerprints, contracts, counts, omission reasons, missingness, row completeness, and descriptive comparisons. It excludes timestamps and absolute output paths.
+
+Technical protocol: [`docs/attrition-missingness.md`](docs/attrition-missingness.md).
+
+Spanish guide: [`docs/learning/reportes-attrition-missingness-es.md`](docs/learning/reportes-attrition-missingness-es.md).
 
 ## Reproducible Synthea adaptation
-
-Synthea exports are adapted as follows:
 
 ```text
 Synthea patients.csv      → patients.csv
@@ -154,7 +195,7 @@ Synthea medications.csv   → medications.csv
 Synthea procedures.csv    → procedures.csv
 ```
 
-The adapter also writes `terminology.csv` and `synthea-adaptation-manifest.json`. Missing source-event identifiers use deterministic UUIDv5 values. Parent relationships, exact source headers, executable contracts, omissions, terminology concepts, hashes, and fingerprints are verified.
+The adapter also writes `terminology.csv` and `synthea-adaptation-manifest.json`. Missing source-event identifiers use deterministic UUIDv5 values. Parent relationships, exact headers, executable contracts, omissions, terminology concepts, hashes, and fingerprints are verified.
 
 The observation adapter intentionally retains only:
 
@@ -164,7 +205,7 @@ The observation adapter intentionally retains only:
 | `8462-4` | `DIASTOLIC_BP` |
 | `8867-4` | `HEART_RATE` |
 
-Other observations are explicitly counted as omitted rather than silently forced into the narrow contract.
+Other observations are explicitly counted as omitted rather than forced into the narrow contract.
 
 See [`docs/synthea.md`](docs/synthea.md).
 
@@ -180,18 +221,9 @@ record iterator
 → set-based INSERT ... SELECT ... ON CONFLICT
 ```
 
-with:
+with the former `executemany` reference using equivalent target semantics.
 
-```text
-former reference
-record iterator
-→ psycopg executemany
-→ equivalent INSERT ... ON CONFLICT
-```
-
-Both routes write to the same migrated tables with terminology triggers, record hashes, patient SCD Type 2 history, immutable-event guards, indexes, constraints, lineage foreign keys, WAL durability settings, and transaction commits active.
-
-### Balanced reference protocol
+Balanced protocol:
 
 | Control | Value |
 |---|---|
@@ -205,8 +237,6 @@ Both routes write to the same migrated tables with terminology triggers, record 
 | Starting-position balance | COPY first 3 times; `executemany` first 3 times |
 | Writer concurrency | 1 |
 
-Every trial must pass exact row-count, history, terminology-binding, record-hash, and database-content fingerprint checks before its timing is accepted.
-
 GitHub Actions workflow run `30470147850` produced:
 
 | Patients | Rows | COPY median | `executemany` median | COPY speedup | Time reduction |
@@ -215,9 +245,7 @@ GitHub Actions workflow run `30470147850` produced:
 | 1,000 | 15,000 | 3,183.671 ms | 4,341.867 ms | 1.364× | 26.68% |
 | 2,500 | 37,500 | 7,936.444 ms | 10,955.541 ms | 1.380× | 27.56% |
 
-This supports a limited engineering statement: on the recorded hosted-runner environment, COPY reduced median governed initial-load time by approximately **23.8–27.6%** relative to the former `executemany` path.
-
-It does not establish complete-pipeline speed, production capacity, concurrent performance, remote-database behavior, or hospital-scale throughput.
+This supports a limited engineering statement: on the recorded hosted-runner environment, COPY reduced median governed initial-load time by approximately **23.8–27.6%** relative to the former route.
 
 Permanent evidence:
 
@@ -228,7 +256,7 @@ benchmarks/loading/github-actions-run-30470147850/
 └── reference-run.json
 ```
 
-Technical protocol: [`docs/loading-benchmark.md`](docs/loading-benchmark.md).
+See [`docs/loading-benchmark.md`](docs/loading-benchmark.md).
 
 ## Six clinical entities
 
@@ -250,7 +278,7 @@ patients
 | medications | immutable event + terminology binding | `medication_id` |
 | procedures | immutable event + terminology binding | `procedure_id` |
 
-Every event references a patient and encounter. Exact duplicates preserve the original record and lineage. Conflicting identifier reuse rolls back the clinical transaction and leaves a failed execution timeline.
+Exact duplicates preserve the original event and lineage. Conflicting identifier reuse rolls back the clinical transaction and leaves a failed execution timeline.
 
 ## Execution lifecycle
 
@@ -263,23 +291,7 @@ created
 → completed
 ```
 
-A failed loading attempt remains auditable and may retry:
-
-```text
-validated
-→ loading       attempt 1
-→ failed        attempt 1
-→ loading       attempt 2
-→ completed     attempt 2
-```
-
-Loading uses separate transaction boundaries:
-
-1. Validated-run registration, journal import, and loading acquisition commit.
-2. COPY staging, target merge, validation-error COPY, and completion commit atomically.
-3. After rollback, failed status is stored in a new transaction.
-
-Completed runs are idempotent. The two-cohort orchestration is stricter: it rejects a pair when any of its identifiers already exists in the target database.
+A failed attempt remains auditable and may retry. Loading uses separate durable transaction boundaries for run registration, governed clinical persistence, and post-rollback failure evidence.
 
 ## Raw landing zone
 
@@ -330,7 +342,7 @@ V007 minimal terminology integration
 V008 execution lifecycle and durable failure audit
 ```
 
-The second cohort requires no V009 because it adds packaged generation profiles, application orchestration, comparison evidence, and existing pipeline runs rather than permanent database objects.
+The quality-report milestone requires no V009 because it adds verified application artifacts rather than permanent database objects.
 
 Expected state:
 
@@ -351,12 +363,10 @@ python -m pip install -e ".[dev]"
 Copy-Item .env.example .env
 docker compose up -d postgres
 $env:DATABASE_URL = "postgresql://clinical_user:clinical_password@localhost:5432/clinical_data"
-$env:CLINICAL_DATA_LOG_LEVEL = "INFO"
-$env:CLINICAL_DATA_LOG_FORMAT = "json"
 
 clinical-data database-migrate
 clinical-data database-validate
-clinical-data run-demo --repository-root . 2> data/clinical-data.jsonl
+clinical-data run-demo --repository-root .
 ```
 
 ## Quality checks
@@ -366,19 +376,14 @@ clinical-data validate-contracts
 clinical-data database-migrate
 clinical-data database-validate
 clinical-data-cohort list-profiles
-clinical-data-benchmark \
-  --allow-destructive-reset \
-  --patients 8 \
-  --repetitions 2 \
-  --warmups 0 \
-  --output-dir /tmp/benchmark
+clinical-data-cohort quality-report --help
 python -m ruff check .
 python -m mypy src
 python -m pytest --cov=clinical_data_platform --cov-report=term-missing
 docker build --tag clinical-data-platform:local .
 ```
 
-Normal CI uses small fixtures for both Synthea cohorts and for the benchmark. The full Java Synthea generator and the larger benchmark profile remain separate from ordinary CI.
+Normal CI uses small checked-in fixtures for both Synthea cohorts. The full Java generator and larger loading benchmark remain separate from ordinary CI.
 
 ## Implemented capabilities
 
@@ -387,51 +392,45 @@ Normal CI uses small fixtures for both Synthea cohorts and for the benchmark. Th
 - formal PostgreSQL migrations;
 - immutable content-addressed raw landing zone;
 - patient SCD Type 2 history and immutable events;
-- six clinical entities;
-- minimal terminology integration;
+- six clinical entities and minimal terminology integration;
 - complete execution states, retries, and durable failures;
 - structured JSON logging;
 - reproducible Synthea generation and deterministic adaptation;
 - two matched-design independently seeded Synthea profiles;
-- identifier-disjoint cohort comparison and stable pair fingerprint;
-- separate two-cohort processing and run lineage;
-- PostgreSQL COPY loading with temporary typed staging;
-- bounded-memory persistence iteration;
-- reproducible correctness-gated loading benchmark;
+- identifier-disjoint cohort comparison and separate load lineage;
+- reproducible attrition, omission-reason, missingness, and completeness reports;
+- PostgreSQL COPY loading with typed staging;
+- correctness-gated loading benchmark;
 - versioned hypertension cohort and feature export;
 - Docker, Compose, PowerShell, POSIX, Ruff, strict mypy, pytest, PostgreSQL integration, and GitHub Actions.
 
 ## Documentation
 
+- [`docs/attrition-missingness.md`](docs/attrition-missingness.md): quality-report definitions, artifacts, and limits;
 - [`docs/synthea-cohorts.md`](docs/synthea-cohorts.md): two-cohort protocol and boundaries;
-- [`docs/synthea.md`](docs/synthea.md): Synthea generation and adaptation;
+- [`docs/synthea.md`](docs/synthea.md): generation and adaptation;
 - [`docs/loading-benchmark.md`](docs/loading-benchmark.md): benchmark protocol and evidence;
 - [`docs/bulk-loading.md`](docs/bulk-loading.md): COPY, staging, merge, and transactions;
 - [`docs/architecture.md`](docs/architecture.md): architecture and boundaries;
 - [`docs/database.md`](docs/database.md): migrations, persistence, and lineage;
 - [`docs/execution-audit.md`](docs/execution-audit.md): lifecycle and failure evidence;
-- [`docs/structured-logging.md`](docs/structured-logging.md): logging schema and redaction;
 - [`docs/clinical-history-policy.md`](docs/clinical-history-policy.md): SCD2 and immutable events;
 - [`docs/clinical-entities.md`](docs/clinical-entities.md): six-entity model;
 - [`docs/terminology.md`](docs/terminology.md): terminology model and licensing boundary;
-- [`docs/analysis-guide.md`](docs/analysis-guide.md): repository review sequence;
-- [`docs/learning/segunda-cohorte-synthea-es.md`](docs/learning/segunda-cohorte-synthea-es.md): Spanish second-cohort guide;
-- [`docs/learning/benchmark-carga-postgresql-es.md`](docs/learning/benchmark-carga-postgresql-es.md): Spanish benchmark guide;
-- [`docs/learning/postgresql-copy-es.md`](docs/learning/postgresql-copy-es.md): Spanish COPY guide;
-- [`docs/learning/reproducible-synthea-es.md`](docs/learning/reproducible-synthea-es.md): Spanish Synthea guide.
+- [`docs/learning/reportes-attrition-missingness-es.md`](docs/learning/reportes-attrition-missingness-es.md): Spanish quality-report guide;
+- [`docs/learning/segunda-cohorte-synthea-es.md`](docs/learning/segunda-cohorte-synthea-es.md): Spanish second-cohort guide.
 
 ## Current limitations
 
 The repository is not yet version `1.0.0`. Remaining milestones include:
 
-- attrition and missingness reports;
 - coverage of at least 90%;
 - multi-version Python CI;
 - dependency and security scanning;
 - non-root container hardening;
 - final documentation and release `1.0.0`.
 
-The two-cohort load is not one global transaction: each dataset retains its existing durable transaction boundaries. Contract validation still materializes the complete source dataset. The full Synthea generator is not executed in normal CI. The benchmark measures initial single-writer loading, not end-to-end latency, updates, concurrency, remote databases, WAL volume, or peak memory. The logging layer has no centralized transport or OpenTelemetry.
+The two-cohort load is not one global transaction. Contract validation still materializes the complete source dataset. The full Synthea generator is not executed in normal CI. Attrition is row-level technical exclusion, not participant follow-up. Missingness classification does not establish MCAR, MAR, or MNAR. The benchmark measures initial single-writer loading, not production capacity. The logging layer has no centralized transport or OpenTelemetry.
 
 ## License
 
