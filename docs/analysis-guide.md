@@ -2,9 +2,7 @@
 
 This guide is intended for reviewing the repository after running the bundled demonstration.
 
-## 1. Validate the contract layer
-
-Before processing data, inspect the active contract set:
+## 1. Validate contracts
 
 ```powershell
 clinical-data list-contracts
@@ -15,13 +13,90 @@ clinical-data show-contract observations
 Verify that:
 
 - every registered dataset has one active manifest entry;
-- every active version follows semantic versioning;
-- every contract has a 64-character SHA-256;
-- the primary key is declared, required, and unique;
-- referenced temporal and measurement fields exist;
-- observation profile codes match the allowed observation codes.
+- versions follow semantic versioning;
+- each contract has a 64-character SHA-256;
+- primary keys are declared, required, and unique;
+- temporal and measurement references resolve to declared columns.
 
-## 2. Run the complete workflow
+## 2. Inspect database migration state
+
+Before loading data:
+
+```powershell
+clinical-data database-status
+clinical-data database-migrate
+clinical-data database-validate
+```
+
+A current fresh database should report:
+
+```text
+managed=True
+detected=3
+current=3
+latest=3
+pending=[]
+```
+
+Inspect history:
+
+```sql
+SELECT
+    version,
+    name,
+    checksum,
+    execution_type,
+    application_version,
+    applied_at,
+    execution_ms
+FROM public.schema_migrations
+ORDER BY version;
+```
+
+Questions:
+
+- Are versions contiguous from V001?
+- Do names correspond to packaged filenames?
+- Are checksums 64 characters?
+- Were versions executed as `migration` or adopted as `baseline`?
+- Does `application_version` identify the package that recorded them?
+
+## 3. Test a managed upgrade
+
+On a disposable database:
+
+```powershell
+clinical-data database-migrate --target-version 1
+clinical-data database-status
+clinical-data database-migrate
+clinical-data database-validate
+```
+
+At V001, verify that `clinical.patients` exists but `clinical.encounters` does not. After the final migration, verify that all clinical and cohort tables exist and `audit.pipeline_runs` includes contract-lineage columns.
+
+This distinguishes fresh-install testing from upgrade testing.
+
+## 4. Understand baseline behavior
+
+A database created before migration history is not adopted automatically.
+
+After reviewing a recognized legacy development database:
+
+```powershell
+clinical-data database-migrate --baseline-existing
+```
+
+Then inspect:
+
+```sql
+SELECT version, execution_type
+FROM public.schema_migrations
+ORDER BY version;
+```
+
+Baseline records indicate recognition of existing structure, not replay of historical SQL. Partial structures must be rejected.
+
+## 5. Run the complete workflow
 
 PowerShell:
 
@@ -35,11 +110,9 @@ POSIX shell:
 sh scripts/run_demo.sh
 ```
 
-The workflow validates four contract-governed datasets, loads PostgreSQL, builds the hypertension cohort, and exports analysis-ready features.
+The workflow migrates PostgreSQL, validates four contract-governed datasets, loads valid rows and errors, builds the hypertension cohort, and exports analysis-ready features.
 
-## 3. Inspect file-level quality outputs
-
-Review each directory under `data/processed/`:
+## 6. Inspect file-level quality outputs
 
 ```text
 data/processed/
@@ -49,58 +122,61 @@ data/processed/
 └── observations/
 ```
 
-Each directory contains valid rows, rejected rows, structured validation errors, and a JSON quality report.
-
-Questions to evaluate:
-
-- Are rejected records preserved?
-- Can every error be linked to a row, entity, patient, field, rule, and rejected value?
-- Do reported counts match the generated files?
-- Does each report include source and contract checksums?
-- Does `contract_path` identify a retained versioned resource?
-- Does the reported contract hash match `show-contract`?
-
-## 4. Inspect the contract architecture
-
-Read these files in order:
-
-1. `src/clinical_data_platform/contracts/manifest.toml`
-2. `src/clinical_data_platform/contracts/patients/v1.0.0.toml`
-3. `src/clinical_data_platform/contracts/observations/v1.0.0.toml`
-4. `src/clinical_data_platform/contract.py`
-5. `src/clinical_data_platform/models.py`
-6. `src/clinical_data_platform/registry.py`
-7. `src/clinical_data_platform/pipeline.py`
-8. `src/clinical_data_platform/database.py`
-
-The separation is intentional:
-
-- contracts describe accepted data and executable rules;
-- `contract.py` parses and executes those rules;
-- `models.py` defines normalized results;
-- `registry.py` retains persistence adapters;
-- `pipeline.py` performs invariant orchestration;
-- `database.py` verifies contract lineage and writes atomically.
-
-The central review questions are:
+Each directory contains:
 
 ```text
-What belongs in a contract?
-What remains controlled code?
-How is a historical run reproduced after the active contract changes?
+valid_<dataset>.csv
+invalid_<dataset>.csv
+validation_errors.csv
+quality_report.json
 ```
 
-See `docs/learning/versioned-executable-contracts-es.md` for the detailed Spanish study guide and exercises.
+Review:
 
-## 5. Inspect PostgreSQL
+- preservation of rejected rows;
+- linkage from each error to row, entity, patient, field, rule, and value;
+- consistency between report counts and CSV files;
+- source and contract SHA-256 values;
+- retained contract resource path;
+- reported contract version.
 
-Open a database shell:
+## 7. Inspect architecture in order
+
+Read:
+
+1. `src/clinical_data_platform/contracts/manifest.toml`
+2. contract resources under `src/clinical_data_platform/contracts/`
+3. `src/clinical_data_platform/contract.py`
+4. migration resources under `src/clinical_data_platform/migrations/`
+5. `src/clinical_data_platform/migration.py`
+6. `src/clinical_data_platform/models.py`
+7. `src/clinical_data_platform/registry.py`
+8. `src/clinical_data_platform/pipeline.py`
+9. `src/clinical_data_platform/database.py`
+10. `src/clinical_data_platform/cohort.py`
+
+Responsibility map:
+
+```text
+contracts     → accepted source data
+contract.py   → contract parsing and execution
+migrations    → ordered database DDL history
+migration.py  → discovery, locking, history, baseline, execution
+pipeline.py   → validation orchestration and file outputs
+registry.py   → typed persistence adapters
+database.py   → transactional dataset persistence
+cohort.py     → analytical derivation
+```
+
+## 8. Inspect PostgreSQL content
+
+Open a shell:
 
 ```bash
 docker compose exec postgres psql -U clinical_user -d clinical_data
 ```
 
-### Row counts
+### Clinical row counts
 
 ```sql
 SELECT 'patients' AS dataset, COUNT(*) FROM clinical.patients
@@ -112,7 +188,7 @@ UNION ALL
 SELECT 'observations', COUNT(*) FROM clinical.observations;
 ```
 
-Expected counts after a clean demo:
+Expected after a clean demo:
 
 | Dataset | Rows |
 |---|---:|
@@ -140,13 +216,7 @@ FROM audit.pipeline_runs
 ORDER BY loaded_at;
 ```
 
-Expected active contract version:
-
-```text
-1.0.0
-```
-
-Each normal run should contain a non-legacy contract path and a nonzero contract hash.
+Normal runs should contain a retained contract path, contract version `1.0.0`, and nonzero source and contract hashes.
 
 ### Rejected-data profile
 
@@ -162,23 +232,32 @@ GROUP BY p.dataset_name, p.contract_version, e.rule_name
 ORDER BY p.dataset_name, p.contract_version, e.rule_name;
 ```
 
-## 6. Test contract tamper detection
+## 9. Test tamper detection
 
-Copy a generated `quality_report.json` and alter one character in `contract_sha256`.
+### Contract lineage tampering
 
-Then run:
+Alter one character of `contract_sha256` in a copied `quality_report.json`, then run:
 
 ```powershell
 clinical-data load-dataset patients `
-  --output-dir data/processed/patients `
-  --schema sql/schema.sql
+  --output-dir data/processed/patients
 ```
 
-The loader should reject the bundle because the reported hash no longer matches the bytes of the referenced contract.
+The loader should reject the bundle before clinical persistence.
 
-Restore the original report before continuing.
+### Migration checksum tampering
 
-## 7. Inspect the analytical cohort
+On a disposable database, modify a checksum in `public.schema_migrations` and execute:
+
+```powershell
+clinical-data database-validate
+```
+
+The migrator should reject the history because packaged SQL no longer matches the recorded checksum.
+
+Restore or reset the database after the exercise.
+
+## 10. Inspect the analytical cohort
 
 ```sql
 SELECT *
@@ -206,7 +285,7 @@ JOIN audit.pipeline_runs AS p ON p.run_id = s.source_run_id
 ORDER BY c.generated_at, p.dataset_name;
 ```
 
-## 8. Inspect exported analysis files
+## 11. Inspect exported files
 
 ```text
 data/analytics/
@@ -214,53 +293,59 @@ data/analytics/
 └── hypertension_cohort_metadata.json
 ```
 
-The CSV is the analysis-ready table. The JSON file records the cohort definition version, parameters, source runs, row count, and generation time.
+The CSV is analysis-ready. The JSON records cohort definition version, parameters, source runs, row count, and generation time.
 
-## 9. Review engineering decisions
+## 12. Review tests
 
-Recommended full review order:
+Recommended order:
 
-1. `docs/architecture.md`
-2. `docs/learning/generic-dataset-architecture-es.md`
-3. `docs/learning/versioned-executable-contracts-es.md`
-4. contract resources under `src/clinical_data_platform/contracts/`
-5. `src/clinical_data_platform/contract.py`
-6. `src/clinical_data_platform/models.py`
-7. `src/clinical_data_platform/registry.py`
-8. `src/clinical_data_platform/pipeline.py`
-9. `src/clinical_data_platform/database.py`
-10. `sql/schema.sql`
-11. `sql/cohorts/hypertension.sql`
-12. `tests/test_contracts.py`
-13. `tests/test_pipeline.py`
-14. `tests/test_database.py`
-15. `tests/test_analysis_workflow.py`
-16. `.github/workflows/ci.yml`
+1. `tests/test_contracts.py`
+2. `tests/test_migration.py`
+3. `tests/test_pipeline.py`
+4. `tests/test_database.py`
+5. `tests/test_analysis_workflow.py`
+6. `.github/workflows/ci.yml`
 
-Key design questions:
+For each test ask:
 
-- Why is the active version selected by a manifest?
-- Why are published contract files retained?
-- Why store both semantic version and SHA-256?
-- Why does SQL remain in Python rather than TOML?
-- Which validation rules are general enough for the contract engine?
-- Which checks still belong in PostgreSQL?
-- What would make a contract change backward-incompatible?
-- How should database migrations align with contract versions?
-- Is run-level idempotency sufficient, or should content-level deduplication also be implemented?
-- What additional observability would be required in production?
+```text
+What failure is this test designed to detect?
+What database state does it assume?
+Does it test fresh install, upgrade, baseline, or steady state?
+What important failure is still untested?
+```
 
-## 10. Known limitations
+## 13. Key design questions
+
+- Why is active contract selection explicit rather than automatic?
+- Why store semantic version and SHA-256 for contracts?
+- Why are contract SQL and migration SQL separate?
+- Why does migration history use checksums?
+- Why are applied migrations immutable?
+- Why is baseline explicit?
+- Why are downgrades not automated?
+- What does the advisory lock protect?
+- Why is `public.schema_migrations` outside `audit`?
+- When would Alembic, Flyway, or Liquibase be preferable?
+- Is snapshot upsert sufficient, or is historical row versioning required?
+
+## 14. Learning guides
+
+- `docs/learning/generic-dataset-architecture-es.md`
+- `docs/learning/versioned-executable-contracts-es.md`
+- `docs/learning/database-migrations-es.md`
+
+## 15. Known limitations
 
 - small synthetic dataset;
-- only four clinical entities;
-- purpose-built contract rule language rather than a general schema standard;
-- no formal database migration framework;
+- four clinical entities;
+- purpose-built contract rule language;
+- purpose-built migration engine;
+- snapshot rather than historical clinical storage;
 - limited terminology support;
-- no authentication or authorization;
-- no PHI handling;
-- no orchestration engine;
+- no immutable raw layer;
+- no authentication or PHI handling;
 - no production monitoring or alerting;
-- one demonstrative cohort rather than a generic cohort-definition language.
+- one demonstrative cohort.
 
-These constraints remain explicit while the repository progresses toward a defensible version `1.0.0`.
+These limitations remain explicit while the repository progresses toward version `1.0.0`.

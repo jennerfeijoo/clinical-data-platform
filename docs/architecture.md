@@ -6,7 +6,7 @@ The repository is progressing toward a portfolio-grade clinical data platform. I
 
 ## Architectural objective
 
-Dataset interfaces must be explicit, executable, versioned, and auditable. The generic pipeline must not contain patient-specific or observation-specific validation branches.
+Dataset interfaces, schema evolution, validation, persistence, and analytical derivation must be explicit and independently reviewable.
 
 ```text
 Dataset name
@@ -17,13 +17,6 @@ Active contract manifest
     ▼
 Versioned TOML contract
     │
-    ├── schema and field order
-    ├── primary key and uniqueness
-    ├── required values
-    ├── types and categories
-    ├── temporal rules
-    └── measurement profiles
-    │
     ▼
 Generic contract engine
     │
@@ -31,59 +24,60 @@ Generic contract engine
 Generic validation pipeline
     │
     ▼
+Formal PostgreSQL migrations
+    │
+    ▼
 Registry-controlled persistence
+    │
+    ▼
+Versioned cohort SQL
 ```
 
-## Data flow
+The generic pipeline contains no patient-specific validation path. Database creation contains no monolithic `schema.sql` path.
+
+## End-to-end data flow
 
 ```text
 Synthetic CSV source
         │
         ▼
-Dataset registry lookup
+Registry + active contract lookup
         │
         ▼
-Contract manifest lookup
+Contract-definition validation
         │
         ▼
-Load and validate active TOML contract
-        │
-        ├── contract version
-        ├── contract path
-        └── contract SHA-256
-        │
-        ▼
-UTF-8 ingestion
-        │
-        ▼
-Execute contract rules
+UTF-8 ingestion and rule execution
         │
         ├── valid rows
         ├── invalid rows
         ├── normalized errors
-        └── quality report
+        └── source/contract quality report
         │
         ▼
-Verify contract lineage again
+Database migration validation
+        │
+        ├── version history
+        ├── migration checksums
+        ├── advisory lock
+        └── pending SQL migrations
         │
         ▼
-Transactional PostgreSQL loading
+Contract-lineage verification
         │
-        ├── registered row builder
-        ├── registered upsert SQL
-        ├── clinical schema
-        └── audit schema
+        ▼
+Transactional PostgreSQL persistence
         │
         ▼
 Versioned cohort SQL
         │
         ▼
-analytics.hypertension_features
+Analysis-ready feature export
 ```
 
 ## Contract resource model
 
-Contracts are packaged application resources:
+Contracts are packaged resources:
 
 ```text
 src/clinical_data_platform/contracts/
@@ -94,111 +88,111 @@ src/clinical_data_platform/contracts/
 └── observations/v1.0.0.toml
 ```
 
-`manifest.toml` maps a dataset name to its active contract resource. A historical contract file is retained after a newer version becomes active.
+The manifest selects an active version. Historical contracts remain available so older validation bundles can be verified by path, version, and SHA-256.
 
-A contract defines:
+## Migration resource model
+
+Database evolution is represented by packaged SQL migrations:
 
 ```text
-name
-semantic version
-primary key
-patient identifier column
-extra-column policy
-ordered columns
-column types
-required and unique flags
-allowed values
-temporal ordering rules
-not-in-future rules
-conditional measurement profiles
+src/clinical_data_platform/migrations/
+├── V001__create_core_clinical_schema.sql
+├── V002__add_longitudinal_entities_and_cohorts.sql
+└── V003__add_contract_lineage.sql
 ```
+
+The migration history is stored in:
+
+```text
+public.schema_migrations
+```
+
+This table is outside `audit` because V001 is responsible for creating the `audit` schema.
 
 ## Core modules
 
 ### `contract.py`
 
-Defines the contract engine:
-
-- parses TOML with Python `tomllib`;
-- validates the contract definition itself;
+- parses TOML with `tomllib`;
+- validates contract consistency;
 - enforces semantic version syntax;
-- checks that primary keys and rule references are internally consistent;
-- computes SHA-256 over the exact contract bytes;
-- executes contract rules against source records;
+- computes contract SHA-256;
+- executes structural, categorical, temporal, and measurement rules;
 - returns normalized `ValidationResult` objects.
 
-The contract engine does not connect to PostgreSQL and does not contain dataset-specific SQL.
+It does not connect to PostgreSQL.
+
+### `migration.py`
+
+- discovers `VNNN__name.sql` resources;
+- verifies contiguous ordering and unique names;
+- calculates migration SHA-256;
+- detects known legacy schema states;
+- validates applied history;
+- acquires a PostgreSQL advisory transaction lock;
+- applies pending migrations transactionally;
+- records execution metadata;
+- supports explicit baseline and target-version operations;
+- rejects downgrades, partial legacy schemas, and checksum drift.
+
+It does not load clinical datasets.
 
 ### `models.py`
 
-Defines normalized structures shared by all datasets:
+Defines normalized cross-dataset structures:
 
 - `ValidationError`;
 - `ValidationResult`;
 - `DatasetPipelineSummary`.
 
-The pipeline consumes these structures and does not depend on dataset-specific error classes.
-
 ### `registry.py`
 
-Defines runtime behavior that remains inappropriate for free-form configuration:
+Defines runtime behavior that is intentionally not free-form configuration:
 
-- row conversion to PostgreSQL values;
-- upsert SQL.
+- typed row conversion;
+- PostgreSQL upsert SQL.
 
-`DatasetDefinition` obtains columns and primary keys from the active contract instead of duplicating them in Python.
-
-The registry and contract manifest must contain the same datasets in the same deterministic order. A mismatch fails early.
+Columns and primary keys come from active contracts rather than duplicated Python constants.
 
 ### `pipeline.py`
 
-Implements the invariant validation workflow through:
+Implements the invariant validation workflow:
 
 ```python
 run_dataset_validation(...)
 ```
 
-It performs:
-
-1. registry lookup;
-2. active contract loading;
-3. source checksum calculation;
-4. CSV ingestion;
-5. contract execution;
-6. output generation;
-7. quality-report generation;
-8. run-summary construction.
-
-The quality report records both source and contract lineage.
+It loads the contract, hashes the source, ingests CSV, executes rules, writes valid and invalid rows, writes normalized errors, and records source/contract lineage.
 
 ### `database.py`
 
-Implements the invariant persistence workflow through:
+Implements dataset persistence:
 
 ```python
 persist_dataset_validation_outputs(...)
 ```
 
-Before persistence it:
+It verifies generated counts and historical contract lineage, converts rows through the registry, stores run metadata and errors, performs upserts, and commits atomically.
 
-1. validates generated output counts;
-2. loads the historical contract referenced by `contract_path`;
-3. verifies dataset identity;
-4. verifies `contract_version`;
-5. recalculates and compares `contract_sha256`;
-6. inserts pipeline metadata;
-7. converts validated rows using the registered row builder;
-8. performs the registered upsert;
-9. stores normalized errors;
-10. commits atomically.
+It does not create or alter database tables.
 
-This allows a run generated under an older retained contract to preserve its exact lineage even after the manifest activates a newer version.
+### `demo.py`
 
-## Validation layers
+Coordinates:
 
-### Contract validation
+```text
+migrate
+→ validate datasets
+→ persist datasets
+→ build cohort
+→ export features
+```
 
-Executed before database access:
+## Validation boundaries
+
+### Contract engine
+
+Handles intrinsic file-level rules:
 
 ```text
 required_column
@@ -215,60 +209,100 @@ unit_consistency
 plausible_range
 ```
 
-### Relational validation
+### Migration engine
 
-Executed by PostgreSQL:
-
-- foreign keys;
-- database check constraints;
-- primary keys;
-- transactional consistency.
-
-Rejected rows are preserved rather than silently dropped.
-
-## Versioning model
-
-Contract versions follow semantic versioning:
+Handles database-history rules:
 
 ```text
-MAJOR.MINOR.PATCH
+contiguous migration versions
+immutable migration checksums
+known current version
+no unmanaged schema drift
+no downgrade
+explicit baseline
+single concurrent migrator
 ```
 
-Policy:
+### PostgreSQL
 
-- PATCH: non-behavioral correction;
-- MINOR: backward-compatible interface addition;
-- MAJOR: incompatible interface change.
+Handles relational integrity:
 
-Published contract resources are not overwritten. A new version is introduced as a new file and activated by updating the manifest.
+- primary keys;
+- foreign keys;
+- check constraints;
+- transactional consistency.
+
+## Migration lifecycle
+
+### Fresh install
+
+```text
+empty database
+→ create migration history
+→ V001
+→ V002
+→ V003
+```
+
+### Managed upgrade
+
+```text
+current V001
+→ validate V001 checksum
+→ apply V002
+→ apply V003
+```
+
+### Legacy baseline
+
+```text
+recognized existing schema
++
+no migration history
+→ explicit --baseline-existing
+→ register equivalent versions as baseline
+```
+
+Partial or unknown structures are rejected.
+
+## Transaction and concurrency model
+
+All pending migrations and their history rows are applied within a PostgreSQL transaction. An advisory transaction lock prevents two cooperating processes from migrating the same database concurrently.
+
+If SQL execution fails, its migration-history insertion is rolled back with it.
 
 ## Reproducibility model
 
-A validation run is identified by:
+A validation run records:
 
 ```text
 run UUID
 source path
 source SHA-256
-contract resource path
+contract path
 contract semantic version
 contract SHA-256
 reference date
 generation timestamp
 ```
 
-The version communicates intended compatibility. The hash identifies the exact bytes executed.
+A database records:
+
+```text
+migration version
+migration name
+migration SHA-256
+application version
+execution type
+application timestamp
+execution duration
+```
+
+Contract version communicates data-interface compatibility. Contract hash identifies exact validation bytes. Migration version communicates schema order. Migration hash identifies exact DDL bytes.
 
 ## Interface layer
 
-The package exposes:
-
-- Python APIs;
-- the `clinical-data` CLI;
-- Docker Compose services;
-- PowerShell and POSIX demo scripts.
-
-Contract-oriented CLI commands:
+Contract commands:
 
 ```text
 clinical-data list-contracts
@@ -276,60 +310,75 @@ clinical-data show-contract
 clinical-data validate-contracts
 ```
 
+Migration commands:
+
+```text
+clinical-data database-status
+clinical-data database-migrate
+clinical-data database-validate
+```
+
 Pipeline commands:
 
 ```text
 clinical-data validate-dataset
 clinical-data load-dataset
+clinical-data build-hypertension-cohort
+clinical-data run-demo
 ```
+
+Loading, cohort construction, and the demo apply pending migrations before writing.
 
 ## Design trade-offs
 
-### TOML instead of YAML
+### Purpose-built SQL migrator
 
-Python 3.11 includes `tomllib`, so contracts can be parsed without another runtime dependency. TOML remains readable and supports nested tables and arrays of tables.
+The project uses explicit SQL and psycopg without an ORM. A small migrator keeps DDL visible and avoids introducing ORM-oriented migration tooling solely to execute SQL files.
 
-### Contracts inside the package
+The cost is ownership of discovery, locking, history validation, baseline detection, and checksum policy. A larger multi-service environment may justify Alembic, Flyway, or Liquibase.
 
-This guarantees that contracts are available in editable installs, wheels, and Docker images. The cost is that publishing a new active contract requires a new package build.
+### Forward-only migrations
 
-### SQL remains in Python
+Downgrades are not automated because reverse DDL can destroy data. Corrections are introduced as new forward migrations. Operational rollback would rely on backup/restore or an explicit compatibility strategy.
 
-Contracts describe accepted data and validation rules. SQL remains controlled code because arbitrary SQL in configuration would expand the execution and security surface.
+### Contracts and migrations remain separate
 
-### Purpose-built rule language
+Contracts define accepted source data. Migrations define database structure. A contract version change does not automatically generate DDL, and a migration does not redefine source validation semantics.
 
-The engine supports the rules required by the current clinical datasets. It is not intended to replace general systems such as JSON Schema, Pydantic, Pandera, or enterprise data-contract platforms.
+### SQL remains controlled code
 
-## Extension rule
+Contracts do not contain arbitrary persistence SQL. The registry and migrations keep database-changing operations reviewable as application-controlled code.
 
-A new dataset is correctly integrated when it can be added without editing:
+## Extension rules
 
-```text
-pipeline.py
-database.py
-```
-
-The extension is limited to:
+A new dataset requires:
 
 - a versioned contract;
 - a manifest entry;
 - a registry persistence adapter;
-- a database table or migration;
+- a new database migration when storage changes;
 - tests;
 - documentation.
+
+A new schema change requires:
+
+- the next contiguous migration file;
+- fresh-install testing;
+- upgrade testing from the previous version;
+- code compatibility changes;
+- no edits to previously applied migrations.
 
 ## Current limitations
 
 The platform does not yet implement:
 
-- database schema migrations;
 - immutable raw storage;
 - historical clinical-record versioning;
 - large-scale loading and benchmarks;
 - external terminology services;
 - production observability;
 - authentication;
-- PHI handling.
+- PHI handling;
+- automated backup or restore workflows.
 
-Executable contracts improve reproducibility and maintainability but do not imply production clinical readiness.
+Formal migrations and executable contracts improve reproducibility and maintainability but do not imply production clinical readiness.

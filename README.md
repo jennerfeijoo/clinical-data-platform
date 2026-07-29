@@ -1,33 +1,47 @@
 # Clinical Data Platform
 
-> Status: active development toward `1.0.0` — version `0.4.0` introduces executable, versioned dataset contracts.
+> Status: active development toward `1.0.0` — version `0.5.0` adds formal, checksum-verified PostgreSQL migrations.
 
-Clinical Data Platform is a synthetic clinical data engineering project that demonstrates the path from raw healthcare-like records to an auditable analysis-ready dataset.
+Clinical Data Platform is a synthetic clinical data engineering project that demonstrates the path from healthcare-like source records to an auditable analysis-ready dataset.
 
 The repository uses only synthetic data. It is intended for engineering review and learning, not for identifiable patient data, clinical decision-making, or production healthcare use.
 
-## Current architectural milestone
+## Current architecture
 
-The platform now separates three concerns explicitly:
+The platform separates four concerns:
 
 ```text
-Versioned data contract
-        │
-        ├── columns and order
-        ├── required values
-        ├── primary key and uniqueness
-        ├── types and categories
-        ├── temporal rules
-        └── measurement profiles
+Versioned TOML contracts
         │
         ▼
 Generic validation pipeline
         │
+        ├── valid rows
+        ├── quarantined rows
+        ├── normalized errors
+        └── source + contract lineage
+        │
+        ▼
+Formal PostgreSQL migrations
+        │
         ▼
 Registry-controlled persistence
+        │
+        ▼
+Versioned cohort SQL and feature export
 ```
 
-The contracts are TOML resources packaged with the application:
+There is no patient-specific pipeline and no monolithic schema installer.
+
+## Executable data contracts
+
+Active contracts are selected explicitly by:
+
+```text
+src/clinical_data_platform/contracts/manifest.toml
+```
+
+Published versions are retained:
 
 ```text
 src/clinical_data_platform/contracts/
@@ -38,116 +52,65 @@ src/clinical_data_platform/contracts/
 └── observations/v1.0.0.toml
 ```
 
-`manifest.toml` selects the active version for every dataset. Historical contract files remain available for reproducibility.
-
-## Why the contracts are executable
-
-The pipeline does not merely display the contracts. It uses them to determine whether each row is valid.
-
-The contract engine currently executes:
+The contract engine executes:
 
 - required and unexpected-column rules;
 - required-value and uniqueness rules;
 - string, date, timezone-aware datetime, and finite-number types;
 - categorical vocabularies;
-- dates that must not be in the future;
-- temporal ordering between fields;
-- conditional measurement units and plausible ranges.
+- temporal ordering and not-in-future rules;
+- conditional units and plausible measurement ranges.
 
-Each validation run records:
+Each validation run records source and contract paths, versions, SHA-256 hashes, reference date, and run UUID.
 
-```text
-source_path
-source_sha256
-contract_path
-contract_version
-contract_sha256
-reference_date
-run_id
-```
+## Formal database migrations
 
-The loader recalculates the contract hash before writing to PostgreSQL. A quality report with inconsistent contract lineage is rejected.
-
-## Data flow
+The database is created and upgraded through packaged SQL migrations:
 
 ```text
-Synthetic CSV files
-        │
-        ▼
-Active contract selected by manifest
-        │
-        ▼
-Executable contract validation
-        │
-        ├── valid rows
-        ├── quarantined rows
-        ├── normalized errors
-        └── quality report + source/contract lineage
-        │
-        ▼
-Transactional PostgreSQL loading
-        │
-        ├── normalized clinical tables
-        └── audit.pipeline_runs
-        │
-        ▼
-Versioned hypertension cohort SQL
-        │
-        ▼
-Analysis-ready feature table + metadata
+src/clinical_data_platform/migrations/
+├── V001__create_core_clinical_schema.sql
+├── V002__add_longitudinal_entities_and_cohorts.sql
+└── V003__add_contract_lineage.sql
 ```
+
+The migration engine:
+
+- enforces contiguous `VNNN__name.sql` ordering;
+- stores history in `public.schema_migrations`;
+- verifies migration names and SHA-256 checksums;
+- applies pending migrations transactionally;
+- uses a PostgreSQL advisory lock to prevent concurrent migration races;
+- supports explicit target versions for upgrade testing;
+- rejects downgrades and history drift;
+- supports explicit baselining of recognized pre-migration schemas.
+
+Applied migrations are immutable. A schema change is introduced by adding a new migration rather than editing an applied one.
 
 ## Implemented capabilities
 
-- active contract manifest;
-- immutable versioned contract resources;
-- contract-definition validation;
+- active contract manifest and immutable contract resources;
 - executable structural, categorical, temporal, and measurement rules;
-- generic validation pipeline for all datasets;
-- generic persistence workflow for all datasets;
-- normalized cross-dataset validation errors;
-- synthetic patients, encounters, diagnoses, and observations;
-- rejected-record quarantine outputs;
-- run UUIDs and SHA-256 checksums for source and contract files;
-- PostgreSQL persistence of contract lineage;
-- transactional, idempotent loading;
+- generic validation and persistence workflows;
+- normalized validation errors and rejected-record quarantine;
+- source and contract lineage with SHA-256 checksums;
+- formal transactional PostgreSQL migrations;
+- fresh-install, upgrade, baseline, and drift validation;
+- normalized clinical, audit, and analytics schemas;
+- transactional, idempotent dataset loading;
 - referential-integrity enforcement;
 - version-controlled hypertension cohort construction;
 - baseline feature generation and CSV export;
 - Docker and Docker Compose execution;
 - PowerShell and POSIX demo scripts;
-- Ruff, mypy, pytest, coverage, PostgreSQL integration tests, and GitHub Actions.
+- Ruff, strict mypy, pytest, coverage, PostgreSQL integration tests, and GitHub Actions.
 
-## Contract inspection commands
-
-List active versions:
-
-```powershell
-clinical-data list-contracts
-```
-
-Show one parsed contract:
-
-```powershell
-clinical-data show-contract observations
-```
-
-Validate every active definition:
-
-```powershell
-clinical-data validate-contracts
-```
-
-Example output from `list-contracts` includes dataset, version, SHA-256, and resource path.
-
-## Fastest way to run the complete workflow
+## Fastest complete run
 
 Requirements:
 
 - Git;
 - Docker with Docker Compose.
-
-Clone the repository:
 
 ```bash
 git clone https://github.com/jennerfeijoo/clinical-data-platform.git
@@ -166,64 +129,17 @@ POSIX shell:
 sh scripts/run_demo.sh
 ```
 
-The scripts start PostgreSQL, build the application image, validate and persist all datasets, construct the cohort, and write generated files under:
+The workflow starts PostgreSQL, builds the image, migrates the database, validates and loads all datasets, constructs the cohort, and writes:
 
 ```text
 data/processed/
 data/analytics/
 ```
 
-Reset the local database when needed:
+Reset a local development database:
 
 ```bash
 docker compose down -v
-```
-
-## Expected bundled-sample result
-
-| Dataset | Received | Valid | Invalid | Errors | Contract |
-|---|---:|---:|---:|---:|---:|
-| Patients | 8 | 5 | 3 | 3 | 1.0.0 |
-| Encounters | 8 | 7 | 1 | 1 | 1.0.0 |
-| Diagnoses | 7 | 6 | 1 | 2 | 1.0.0 |
-| Observations | 14 | 13 | 1 | 1 | 1.0.0 |
-
-The default hypertension cohort contains two patients:
-
-| Patient | Baseline BP | Follow-up |
-|---|---:|---:|
-| `P001` | 146/92 mmHg | 95 days |
-| `P002` | 151/96 mmHg | 37 days |
-
-`P005` has hypertension and baseline blood pressure but is excluded because the synthetic dataset contains insufficient follow-up.
-
-## Generated outputs
-
-Each validated dataset produces:
-
-```text
-valid_<dataset>.csv
-invalid_<dataset>.csv
-validation_errors.csv
-quality_report.json
-```
-
-The quality report includes contract lineage:
-
-```json
-{
-  "contract_path": "patients/v1.0.0.toml",
-  "contract_version": "1.0.0",
-  "contract_sha256": "..."
-}
-```
-
-The analytical stage produces:
-
-```text
-data/analytics/
-├── hypertension_features.csv
-└── hypertension_cohort_metadata.json
 ```
 
 ## Local Python development
@@ -242,11 +158,34 @@ docker compose up -d postgres
 $env:DATABASE_URL = "postgresql://clinical_user:clinical_password@localhost:5432/clinical_data"
 ```
 
-Run the complete workflow without the application container:
+Inspect database state before modifying it:
+
+```powershell
+clinical-data database-status
+```
+
+Apply all pending migrations:
+
+```powershell
+clinical-data database-migrate
+clinical-data database-validate
+```
+
+Run the workflow:
 
 ```powershell
 clinical-data run-demo --repository-root .
 ```
+
+### Existing local database from version 0.4.0 or earlier
+
+The migrator will not silently claim ownership of pre-existing platform tables. Review the database, then either reset the development volume or explicitly baseline a recognized schema:
+
+```powershell
+clinical-data database-migrate --baseline-existing
+```
+
+A partial or unrecognized schema is rejected.
 
 ## Main CLI commands
 
@@ -254,10 +193,30 @@ clinical-data run-demo --repository-root .
 clinical-data list-contracts
 clinical-data show-contract
 clinical-data validate-contracts
+clinical-data database-status
+clinical-data database-migrate
+clinical-data database-validate
 clinical-data validate-dataset
 clinical-data load-dataset
 clinical-data build-hypertension-cohort
 clinical-data run-demo
+```
+
+List contracts:
+
+```powershell
+clinical-data list-contracts
+clinical-data show-contract observations
+clinical-data validate-contracts
+```
+
+Test an upgrade path:
+
+```powershell
+clinical-data database-migrate --target-version 1
+clinical-data database-status
+clinical-data database-migrate
+clinical-data database-validate
 ```
 
 Validate patients:
@@ -268,24 +227,92 @@ clinical-data validate-dataset patients data/sample/patients.csv `
   --reference-date 2026-07-29
 ```
 
-Load validated patients:
+Load patients. The command applies pending migrations first:
 
 ```powershell
 clinical-data load-dataset patients `
-  --output-dir data/processed/patients `
-  --schema sql/schema.sql
+  --output-dir data/processed/patients
 ```
+
+## Expected sample result
+
+| Dataset | Received | Valid | Invalid | Errors | Contract |
+|---|---:|---:|---:|---:|---:|
+| Patients | 8 | 5 | 3 | 3 | 1.0.0 |
+| Encounters | 8 | 7 | 1 | 1 | 1.0.0 |
+| Diagnoses | 7 | 6 | 1 | 2 | 1.0.0 |
+| Observations | 14 | 13 | 1 | 1 | 1.0.0 |
+
+The hypertension cohort contains:
+
+| Patient | Baseline BP | Follow-up |
+|---|---:|---:|
+| `P001` | 146/92 mmHg | 95 days |
+| `P002` | 151/96 mmHg | 37 days |
+
+## Generated outputs
+
+Each dataset produces:
+
+```text
+valid_<dataset>.csv
+invalid_<dataset>.csv
+validation_errors.csv
+quality_report.json
+```
+
+The quality report includes:
+
+```json
+{
+  "contract_path": "patients/v1.0.0.toml",
+  "contract_version": "1.0.0",
+  "contract_sha256": "...",
+  "input_sha256": "...",
+  "run_id": "..."
+}
+```
+
+The analytical stage produces:
+
+```text
+data/analytics/
+├── hypertension_features.csv
+└── hypertension_cohort_metadata.json
+```
+
+## Migration history
+
+Inspect applied versions:
+
+```sql
+SELECT
+    version,
+    name,
+    checksum,
+    execution_type,
+    application_version,
+    applied_at,
+    execution_ms
+FROM public.schema_migrations
+ORDER BY version;
+```
+
+`execution_type = migration` means the runner executed the SQL. `execution_type = baseline` means an existing recognized schema was explicitly adopted without replaying historical DDL.
 
 ## Quality checks
 
 ```bash
+clinical-data validate-contracts
+clinical-data database-migrate
+clinical-data database-validate
 python -m ruff check .
 python -m mypy src
 python -m pytest --cov=clinical_data_platform --cov-report=term-missing
 docker build --tag clinical-data-platform:local .
 ```
 
-Integration tests use PostgreSQL and run automatically in GitHub Actions.
+CI also tests migration installation, upgrade, explicit baseline, checksum drift rejection, packaged contract discovery, Docker construction, and container resource availability.
 
 ## Repository structure
 
@@ -300,16 +327,19 @@ clinical-data-platform/
 │   ├── hypertension-cohort.md
 │   └── learning/
 │       ├── generic-dataset-architecture-es.md
-│       └── versioned-executable-contracts-es.md
+│       ├── versioned-executable-contracts-es.md
+│       └── database-migrations-es.md
 ├── scripts/
-├── sql/
+├── sql/cohorts/
 ├── src/clinical_data_platform/
 │   ├── contracts/
+│   ├── migrations/
 │   ├── cohort.py
 │   ├── contract.py
 │   ├── database.py
 │   ├── demo.py
 │   ├── ingestion.py
+│   ├── migration.py
 │   ├── models.py
 │   ├── pipeline.py
 │   └── registry.py
@@ -323,35 +353,24 @@ clinical-data-platform/
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md): system architecture and boundaries;
-- [`docs/learning/generic-dataset-architecture-es.md`](docs/learning/generic-dataset-architecture-es.md): generic registry architecture;
-- [`docs/learning/versioned-executable-contracts-es.md`](docs/learning/versioned-executable-contracts-es.md): detailed Spanish guide to contract execution and versioning;
+- [`docs/database.md`](docs/database.md): migrations, persistence, idempotency, and lineage;
 - [`docs/analysis-guide.md`](docs/analysis-guide.md): technical review sequence and SQL queries;
-- [`docs/database.md`](docs/database.md): persistence, idempotency, and lineage;
+- [`docs/learning/generic-dataset-architecture-es.md`](docs/learning/generic-dataset-architecture-es.md): generic dataset architecture;
+- [`docs/learning/versioned-executable-contracts-es.md`](docs/learning/versioned-executable-contracts-es.md): contract execution and versioning;
+- [`docs/learning/database-migrations-es.md`](docs/learning/database-migrations-es.md): formal migration study guide;
 - [`docs/hypertension-cohort.md`](docs/hypertension-cohort.md): cohort definition and variables.
-
-## Versioning policy for contracts
-
-Published contract files are not overwritten.
-
-```text
-PATCH: non-behavioral correction
-MINOR: backward-compatible addition
-MAJOR: incompatible interface change
-```
-
-A new active version is introduced by adding a new file and updating `manifest.toml`.
 
 ## Current limitations
 
-The repository is not yet version `1.0.0`. The next architectural steps include:
+The repository is not yet version `1.0.0`. Remaining milestones include:
 
-- database schema migration tooling;
 - immutable raw-data storage;
 - historical record strategy;
-- larger synthetic datasets and benchmarks;
+- larger synthetic datasets and performance benchmarks;
 - expanded entities and terminology normalization;
 - stronger operational observability;
-- additional cohort definitions and attrition reporting.
+- additional cohort definitions, attrition, and missingness reporting;
+- broader security and release hardening.
 
 It intentionally excludes identifiable patient data, production clinical decision support, enterprise authentication, and regulatory deployment claims.
 
