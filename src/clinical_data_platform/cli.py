@@ -12,12 +12,11 @@ from clinical_data_platform.database import (
     apply_schema,
     connect_database,
     database_url_from_environment,
-    persist_patient_validation_outputs,
+    persist_dataset_validation_outputs,
 )
 from clinical_data_platform.demo import run_demo
-from clinical_data_platform.entity_database import persist_entity_validation_outputs
-from clinical_data_platform.entity_pipeline import DATASET_CONFIGURATION, run_entity_validation
-from clinical_data_platform.pipeline import run_patient_validation
+from clinical_data_platform.pipeline import run_dataset_validation
+from clinical_data_platform.registry import dataset_names
 
 
 def _iso_date(value: str) -> date:
@@ -31,62 +30,39 @@ def _database_url(explicit_value: str | None) -> str:
     return explicit_value or database_url_from_environment()
 
 
+def _default_output_directory(dataset: str) -> Path:
+    return Path("data") / "processed" / dataset
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="clinical-data",
         description="Run reproducible workflows for synthetic clinical data.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+    supported_datasets = dataset_names()
 
-    validate_patients = subparsers.add_parser(
-        "validate-patients",
-        help="Validate a patient CSV file and write quality outputs.",
+    validate_dataset = subparsers.add_parser(
+        "validate-dataset",
+        help="Validate any registered dataset and write quality outputs.",
     )
-    validate_patients.add_argument("input", type=Path)
-    validate_patients.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("data/processed/patients"),
-    )
-    validate_patients.add_argument("--reference-date", type=_iso_date, default=None)
+    validate_dataset.add_argument("dataset", choices=supported_datasets)
+    validate_dataset.add_argument("input", type=Path)
+    validate_dataset.add_argument("--output-dir", type=Path, default=None)
+    validate_dataset.add_argument("--reference-date", type=_iso_date, default=None)
 
-    load_patients = subparsers.add_parser(
-        "load-patients",
-        help="Load patient validation outputs into PostgreSQL.",
+    load_dataset = subparsers.add_parser(
+        "load-dataset",
+        help="Load any registered dataset validation output into PostgreSQL.",
     )
-    load_patients.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("data/processed/patients"),
-    )
-    load_patients.add_argument(
+    load_dataset.add_argument("dataset", choices=supported_datasets)
+    load_dataset.add_argument("--output-dir", type=Path, default=None)
+    load_dataset.add_argument(
         "--schema",
         type=Path,
         default=Path("sql/schema.sql"),
     )
-    load_patients.add_argument("--database-url", default=None)
-
-    validate_entity = subparsers.add_parser(
-        "validate-entity",
-        help="Validate encounters, diagnoses, or observations.",
-    )
-    validate_entity.add_argument("dataset", choices=sorted(DATASET_CONFIGURATION))
-    validate_entity.add_argument("input", type=Path)
-    validate_entity.add_argument("--output-dir", type=Path, required=True)
-    validate_entity.add_argument("--reference-date", type=_iso_date, default=None)
-
-    load_entity = subparsers.add_parser(
-        "load-entity",
-        help="Load validated encounters, diagnoses, or observations.",
-    )
-    load_entity.add_argument("dataset", choices=sorted(DATASET_CONFIGURATION))
-    load_entity.add_argument("--output-dir", type=Path, required=True)
-    load_entity.add_argument(
-        "--schema",
-        type=Path,
-        default=Path("sql/schema.sql"),
-    )
-    load_entity.add_argument("--database-url", default=None)
+    load_dataset.add_argument("--database-url", default=None)
 
     build_cohort = subparsers.add_parser(
         "build-hypertension-cohort",
@@ -122,14 +98,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.command == "validate-patients":
-        validation_summary = run_patient_validation(
+    if args.command == "validate-dataset":
+        output_directory = args.output_dir or _default_output_directory(args.dataset)
+        validation_summary = run_dataset_validation(
+            args.dataset,
             args.input,
-            args.output_dir,
+            output_directory,
             reference_date=args.reference_date,
         )
         print(
-            "Patient validation completed: "
+            f"{validation_summary.dataset} validation completed: "
             f"run_id={validation_summary.run_id}, "
             f"received={validation_summary.rows_received}, "
             f"valid={validation_summary.rows_valid}, "
@@ -138,53 +116,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
 
-    if args.command == "load-patients":
+    if args.command == "load-dataset":
+        output_directory = args.output_dir or _default_output_directory(args.dataset)
         with connect_database(_database_url(args.database_url)) as connection:
             apply_schema(connection, args.schema)
-            patient_persistence = persist_patient_validation_outputs(
-                connection,
-                args.output_dir,
-            )
-        print(
-            "Patient persistence completed: "
-            f"run_id={patient_persistence.run_id}, "
-            f"already_loaded={patient_persistence.already_loaded}, "
-            f"patients={patient_persistence.patients_upserted}, "
-            f"errors={patient_persistence.validation_errors_inserted}"
-        )
-        return 0
-
-    if args.command == "validate-entity":
-        entity_validation = run_entity_validation(
-            args.dataset,
-            args.input,
-            args.output_dir,
-            reference_date=args.reference_date,
-        )
-        print(
-            f"{entity_validation.dataset} validation completed: "
-            f"run_id={entity_validation.run_id}, "
-            f"received={entity_validation.rows_received}, "
-            f"valid={entity_validation.rows_valid}, "
-            f"invalid={entity_validation.rows_invalid}, "
-            f"errors={entity_validation.validation_errors}"
-        )
-        return 0
-
-    if args.command == "load-entity":
-        with connect_database(_database_url(args.database_url)) as connection:
-            apply_schema(connection, args.schema)
-            entity_persistence = persist_entity_validation_outputs(
+            persistence_summary = persist_dataset_validation_outputs(
                 connection,
                 args.dataset,
-                args.output_dir,
+                output_directory,
             )
         print(
-            f"{entity_persistence.dataset} persistence completed: "
-            f"run_id={entity_persistence.run_id}, "
-            f"already_loaded={entity_persistence.already_loaded}, "
-            f"records={entity_persistence.records_upserted}, "
-            f"errors={entity_persistence.validation_errors_inserted}"
+            f"{persistence_summary.dataset} persistence completed: "
+            f"run_id={persistence_summary.run_id}, "
+            f"already_loaded={persistence_summary.already_loaded}, "
+            f"records={persistence_summary.records_upserted}, "
+            f"errors={persistence_summary.validation_errors_inserted}"
         )
         return 0
 
