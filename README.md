@@ -1,6 +1,6 @@
 # Clinical Data Platform
 
-> Status: active development toward `1.0.0` — version `0.18.0` adds PostgreSQL-backed CI across CPython 3.11–3.14 while retaining mandatory statement coverage of at least 90%.
+> Status: active development toward `1.0.0` — version `0.19.0` adds automated dependency, source-code, workflow supply-chain, and container vulnerability scanning.
 
 Clinical Data Platform is a synthetic clinical data engineering project that demonstrates how healthcare-like CSV sources become auditable, terminology-linked, analysis-ready datasets.
 
@@ -36,9 +36,40 @@ Governed target merge
             └── attrition and missingness evidence
 ```
 
+## Security and dependency scanning
+
+Version `0.19.0` adds independent controls for different risk surfaces:
+
+| Surface | Control | Blocking policy |
+|---|---|---|
+| Installed Python dependencies | `pip-audit` | Known vulnerabilities fail the job. |
+| Python source patterns | Bandit | Findings with at least medium severity and confidence fail the job. |
+| Python data flows | CodeQL `security-extended` | Results are published to GitHub code scanning. |
+| Pull-request dependency changes | Dependency Review Action | Newly introduced high or critical vulnerabilities fail the pull request. |
+| Built container image | Trivy | Fixed high or critical OS/library vulnerabilities fail the job. |
+| Dependency freshness | Dependabot | Weekly update pull requests for Python, Actions, and Docker. |
+| Workflow supply chain | Full commit-SHA action pins | Policy tests reject mutable action tags and branches. |
+
+The security workflow runs on pull requests, pushes to `main`, manual dispatch, and a weekly schedule. It publishes JSON audit evidence and a CycloneDX Python SBOM where applicable.
+
+Local checks:
+
+```bash
+python -m pip install -e ".[dev,security]"
+python -m pip check
+python -m pip_audit --local --progress-spinner off
+python -m bandit -r src -ll -ii
+```
+
+- Security policy: [`SECURITY.md`](SECURITY.md)
+- Technical policy: [`docs/security-scanning.md`](docs/security-scanning.md)
+- Spanish guide: [`docs/learning/security-dependencias-es.md`](docs/learning/security-dependencias-es.md)
+
+A green scan means that the configured tools found no blocking issue under their current advisory databases, rules, thresholds, and environment. It does not prove absence of vulnerabilities, secure deployment, PHI readiness, regulatory compliance, or clinical safety.
+
 ## Python compatibility
 
-Version `0.18.0` declares:
+Version `0.19.0` retains the explicitly tested range:
 
 ```toml
 requires-python = ">=3.11,<3.15"
@@ -54,8 +85,6 @@ requires-python = ">=3.11,<3.15"
 
 Python 3.11 runs Ruff, strict mypy, coverage, Docker, container smoke tests, and the governed loading benchmark. Python 3.12–3.14 each receive an isolated PostgreSQL 16 service and run installation, `pip check`, contracts, migrations, and the complete coverage-gated test suite.
 
-The matrix uses `fail-fast: false`, so every supported interpreter reports independently.
-
 - Technical policy: [`docs/python-compatibility.md`](docs/python-compatibility.md)
 - Spanish guide: [`docs/learning/compatibilidad-python-ci-es.md`](docs/learning/compatibilidad-python-ci-es.md)
 
@@ -63,15 +92,11 @@ The matrix uses `fail-fast: false`, so every supported interpreter reports indep
 
 The project enforces at least 90% statement coverage through shared pytest configuration:
 
-```text
-3,935 measured statements
-3,547 covered statements
-388 missed statements
-90.14% total coverage
-142 tests passed
+```bash
+python -m pytest
 ```
 
-A normal `python -m pytest` run applies the threshold. Coverage is a regression barrier, not proof of clinical correctness, security, or production readiness.
+Coverage is a regression barrier, not proof of clinical correctness, security, or production readiness.
 
 - Technical policy: [`docs/testing-coverage.md`](docs/testing-coverage.md)
 - Spanish guide: [`docs/learning/cobertura-pruebas-90-es.md`](docs/learning/cobertura-pruebas-90-es.md)
@@ -120,10 +145,21 @@ source rows
 → contract-aware missingness
 → row completeness
 → cohort comparison
-→ stable fingerprint
+→ stable fingerprints
 ```
 
-See [`docs/synthea-cohorts.md`](docs/synthea-cohorts.md) and [`docs/attrition-missingness.md`](docs/attrition-missingness.md).
+- [`docs/synthea.md`](docs/synthea.md)
+- [`docs/synthea-cohorts.md`](docs/synthea-cohorts.md)
+- [`docs/attrition-missingness.md`](docs/attrition-missingness.md)
+
+## PostgreSQL loading and benchmark
+
+Validated rows are streamed through PostgreSQL `COPY` into typed temporary staging tables and then merged into governed clinical targets with triggers, constraints, terminology resolution, lineage, and transaction boundaries active.
+
+The benchmark compares this route with the former `executemany` implementation using deterministic synthetic workloads and database-fingerprint equivalence checks.
+
+- [`docs/bulk-loading.md`](docs/bulk-loading.md)
+- [`docs/loading-benchmark.md`](docs/loading-benchmark.md)
 
 ## PostgreSQL migrations
 
@@ -147,7 +183,7 @@ latest=8
 pending=[]
 ```
 
-The Python compatibility milestone introduces no V009 because it changes package metadata, workflows, tests, and documentation rather than persistent database objects.
+The security milestone introduces no `V009` because it changes workflows, package metadata, tests, and documentation rather than persistent database objects.
 
 ## Local development
 
@@ -155,7 +191,7 @@ The Python compatibility milestone introduces no V009 because it changes package
 python --version
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,security]"
 python -m pip check
 
 Copy-Item .env.example .env
@@ -175,34 +211,29 @@ clinical-data-cohort list-profiles
 python -m ruff check .
 python -m mypy src
 python -m pytest
+python -m pip_audit --local --progress-spinner off
+python -m bandit -r src -ll -ii
 docker build --tag clinical-data-platform:local .
 ```
 
-A local run validates only the selected interpreter. GitHub Actions is the authoritative multi-version result.
-
 ## Implemented capabilities
 
-- generic contract-governed architecture;
-- executable versioned contracts and formal migrations;
-- immutable content-addressed raw landing zone;
-- six clinical entities and minimal terminology integration;
-- patient SCD Type 2 history and immutable events;
+- generic contract-governed architecture and versioned executable contracts;
+- formal PostgreSQL migrations and immutable content-addressed raw landing;
+- six clinical entities, minimal terminology integration, SCD2 history, and immutable events;
 - complete execution states, retries, durable failures, and structured JSON logs;
 - reproducible Synthea generation, two independent cohorts, and quality reports;
 - PostgreSQL COPY loading and a correctness-gated benchmark;
 - mandatory statement coverage of at least 90%;
-- PostgreSQL-backed CPython 3.11–3.14 CI;
-- Docker, Compose, PowerShell, POSIX, Ruff, strict mypy, and pytest.
+- PostgreSQL-backed CPython 3.11–3.14 compatibility CI;
+- dependency review, `pip-audit`, Bandit, CodeQL, Trivy, Dependabot, and full-SHA action pinning;
+- Docker, Compose, PowerShell, POSIX, Ruff, strict mypy, pytest, and GitHub Actions.
 
 ## Documentation
 
+- [`docs/security-scanning.md`](docs/security-scanning.md)
 - [`docs/python-compatibility.md`](docs/python-compatibility.md)
 - [`docs/testing-coverage.md`](docs/testing-coverage.md)
-- [`docs/attrition-missingness.md`](docs/attrition-missingness.md)
-- [`docs/synthea-cohorts.md`](docs/synthea-cohorts.md)
-- [`docs/synthea.md`](docs/synthea.md)
-- [`docs/loading-benchmark.md`](docs/loading-benchmark.md)
-- [`docs/bulk-loading.md`](docs/bulk-loading.md)
 - [`docs/architecture.md`](docs/architecture.md)
 - [`docs/database.md`](docs/database.md)
 - [`docs/execution-audit.md`](docs/execution-audit.md)
@@ -214,11 +245,10 @@ A local run validates only the selected interpreter. GitHub Actions is the autho
 
 Remaining milestones before `1.0.0`:
 
-- dependency and security scanning;
 - non-root container hardening;
 - final documentation and release engineering.
 
-The matrix covers CPython on Ubuntu runners, not every interpreter, operating system, or architecture. The full Synthea Java generator is not executed in normal CI. Attrition is technical row exclusion, not participant follow-up. Missingness classification does not establish MCAR, MAR, or MNAR. The benchmark measures initial single-writer loading, not production capacity. The repository is not PHI-ready.
+The repository is not PHI-ready. The Synthea Java generator is not executed in normal CI. Contract validation still materializes complete source datasets. The two-cohort load is not one global transaction. Attrition is technical row exclusion, not participant follow-up. Missingness classification does not establish MCAR, MAR, or MNAR. The benchmark measures initial single-writer loading, not production capacity. Automated security tools do not replace threat modeling, manual review, penetration testing, deployment hardening, or regulatory controls.
 
 ## License
 
