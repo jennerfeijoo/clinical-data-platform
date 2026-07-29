@@ -19,6 +19,7 @@ def clean_database_connection() -> Iterator[psycopg.Connection[Any]]:
     with connect_database(DATABASE_URL) as connection:
         connection.execute(
             """
+            DROP SCHEMA IF EXISTS terminology CASCADE;
             DROP SCHEMA IF EXISTS analytics CASCADE;
             DROP SCHEMA IF EXISTS clinical CASCADE;
             DROP SCHEMA IF EXISTS audit CASCADE;
@@ -31,6 +32,7 @@ def clean_database_connection() -> Iterator[psycopg.Connection[Any]]:
         connection.rollback()
         connection.execute(
             """
+            DROP SCHEMA IF EXISTS terminology CASCADE;
             DROP SCHEMA IF EXISTS analytics CASCADE;
             DROP SCHEMA IF EXISTS clinical CASCADE;
             DROP SCHEMA IF EXISTS audit CASCADE;
