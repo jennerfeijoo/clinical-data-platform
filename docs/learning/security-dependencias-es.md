@@ -25,7 +25,7 @@ src/
 → CodeQL
 
 Dockerfile
-→ build de imagen
+→ build multi-stage
 → Trivy
 
 workflows
@@ -78,7 +78,7 @@ requires = ["setuptools>=83"]
 
 y el workflow actualiza `setuptools` antes de auditar.
 
-Este ejemplo muestra el valor del control: una dependencia de construcción también forma parte de la superficie de supply chain.
+Este ejemplo muestra que una dependencia de construcción también forma parte de la superficie de supply chain.
 
 ## 5. Bandit
 
@@ -184,20 +184,46 @@ HIGH
 CRITICAL
 ```
 
-La primera ejecución encontró versiones corregibles de:
+La primera ejecución encontró componentes corregibles de la herramienta de empaquetado. Después de actualizarlos, un segundo escaneo todavía detectó:
 
 ```text
-jaraco.context 5.3.0 → mínimo 6.1.0
-wheel 0.45.1         → mínimo 0.46.2
+msgpack 1.1.2
+setuptools 70.3.0
 ```
 
-El Dockerfile ahora actualiza:
+No eran dependencias necesarias de la aplicación. Procedían de `pip`, sus componentes vendorizados y los paquetes de bootstrap presentes en la imagen base.
+
+Actualizar una biblioteca en una capa posterior no elimina necesariamente todos los metadatos antiguos del filesystem final. Por eso la solución definitiva fue separar construcción y ejecución.
+
+### Etapa builder
 
 ```text
-setuptools >=83
-wheel >=0.46.2
-jaraco.context >=6.1.0
+crear /opt/venv
+→ instalar setuptools y wheel corregidos
+→ instalar la aplicación
+→ eliminar pip, setuptools y wheel del entorno virtual
 ```
+
+### Etapa runtime
+
+```text
+eliminar ejecutables pip globales
+→ eliminar site-packages global
+→ eliminar ensurepip y sus wheels de bootstrap
+→ copiar únicamente /opt/venv desde el builder
+```
+
+El runtime conserva:
+
+```text
+aplicación
+psycopg y dependencias necesarias
+datos sintéticos y SQL empaquetados
+```
+
+pero no conserva un gestor de paquetes ni un entorno de construcción. Con ello Trivy dejó de detectar los metadatos vulnerables.
+
+Este cambio todavía no ejecuta el contenedor como usuario no root. Ese endurecimiento corresponde al siguiente hito.
 
 La política ignora como condición de fallo los hallazgos sin corrección disponible. Siguen siendo visibles. “Sin corrección” no significa “sin riesgo”; significa que el pipeline no dispone de una versión reparada que instalar.
 
@@ -277,13 +303,13 @@ La ejecución local puede diferir de CI porque las versiones transitivas y el si
 5. ¿Qué significan severidad y confianza en Bandit?
 6. ¿Por qué una baseline es preferible a desactivar B608 globalmente?
 7. ¿Qué diferencia existe entre Dependency Review y el audit del entorno head?
-8. ¿Qué componentes inspecciona Trivy?
-9. ¿Por qué se fijan las acciones mediante SHA completo?
+8. ¿Por qué actualizar un paquete en una capa Docker no siempre basta?
+9. ¿Qué se conserva y qué se elimina en la imagen runtime?
 10. ¿Por qué un workflow verde no demuestra seguridad total?
 
 ## 16. Explicación profesional defendible
 
-> La plataforma aplica controles de seguridad en varias capas. `pip-audit` examina el entorno Python completo de cada pull request y genera un SBOM CycloneDX. Bandit ejecuta un gate de severidad y confianza medias contra una baseline limitada a dos consultas construidas exclusivamente con constantes internas. CodeQL añade análisis de flujos. Trivy inspecciona la imagen y bloquea vulnerabilidades altas o críticas con corrección disponible. Dependabot propone actualizaciones y todas las acciones externas están fijadas mediante SHA completo. La Dependency Review Action no se presenta como implementada porque el Dependency Graph del repositorio no está habilitado.
+> La plataforma aplica controles de seguridad en varias capas. `pip-audit` examina el entorno Python completo de cada pull request y genera un SBOM CycloneDX. Bandit ejecuta un gate contra una baseline limitada a dos consultas construidas exclusivamente con constantes internas. CodeQL añade análisis de flujos. Trivy inspecciona la imagen y bloquea vulnerabilidades altas o críticas con corrección disponible. El contenedor usa una construcción multi-stage y elimina gestores de paquetes y site-packages globales del runtime. Dependabot propone actualizaciones y todas las acciones externas están fijadas mediante SHA completo. La Dependency Review Action no se presenta como implementada porque el Dependency Graph del repositorio no está habilitado.
 
 ## 17. Límites
 
