@@ -26,6 +26,7 @@ from clinical_data_platform.synthea_cohorts import (
     load_synthea_cohort_pair,
     packaged_synthea_profile_names,
 )
+from clinical_data_platform.synthea_quality import generate_synthea_quality_report
 
 
 def _add_profile_name(parser: argparse.ArgumentParser, argument: str = "profile_name") -> None:
@@ -59,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="clinical-data-cohort",
         description=(
-            "Generate, verify, compare, and load independent matched-design "
+            "Generate, verify, compare, report, and load independent matched-design "
             "Synthea cohorts."
         ),
     )
@@ -107,6 +108,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Verify two matched-design cohorts and prove identifier disjointness.",
     )
     _add_pair_arguments(compare)
+
+    quality_report = subparsers.add_parser(
+        "quality-report",
+        help="Generate reproducible attrition and missingness reports for a cohort pair.",
+    )
+    _add_pair_arguments(quality_report)
+    quality_report.set_defaults(output_dir=Path("data/synthea/cohort-quality"))
 
     load_pair = subparsers.add_parser(
         "load-pair",
@@ -218,6 +226,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"fingerprint={comparison_summary.comparison_fingerprint}, "
             f"overlaps={comparison_summary.overlap_counts}, "
             f"manifest={comparison_summary.manifest_path}"
+        )
+        return 0
+
+    if args.command == "quality-report":
+        quality_summary = generate_synthea_quality_report(
+            args.cohort_a_directory,
+            args.cohort_b_directory,
+            args.output_dir,
+            cohort_a_profile_name=args.cohort_a_profile,
+            cohort_b_profile_name=args.cohort_b_profile,
+            cohort_a_label=args.cohort_a_label,
+            cohort_b_label=args.cohort_b_label,
+            replace=args.replace,
+        )
+        print(
+            "Synthea attrition and missingness report completed: "
+            f"comparison={quality_summary.comparison.comparison_fingerprint}, "
+            f"quality={quality_summary.quality_fingerprint}, "
+            f"manifest={quality_summary.manifest_path}"
         )
         return 0
 
