@@ -152,7 +152,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "generate":
         selected = load_packaged_synthea_profile(args.profile_name)
         workspace = args.workspace or _workspace_for_profile(selected.name)
-        summary = generate_synthea_dataset(
+        generation_summary = generate_synthea_dataset(
             workspace,
             profile=selected,
             checkout_directory=args.checkout,
@@ -160,10 +160,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(
             "Synthea cohort generation completed: "
-            f"profile={summary.profile_name}, "
-            f"upstream_commit={summary.upstream_commit}, "
-            f"fingerprint={summary.dataset_fingerprint}, "
-            f"manifest={summary.manifest_path}"
+            f"profile={generation_summary.profile_name}, "
+            f"upstream_commit={generation_summary.upstream_commit}, "
+            f"fingerprint={generation_summary.dataset_fingerprint}, "
+            f"manifest={generation_summary.manifest_path}"
         )
         return 0
 
@@ -172,7 +172,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_directory = args.output_dir or (
             _workspace_for_profile(selected.name) / "normalized"
         )
-        summary = adapt_synthea_csv(
+        adaptation_summary = adapt_synthea_csv(
             args.csv_directory,
             output_directory,
             profile=selected,
@@ -181,27 +181,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(
             "Synthea cohort adaptation completed: "
-            f"profile={summary.profile_name}, rows={summary.dataset_rows}, "
-            f"omitted={summary.omitted_rows}, "
-            f"fingerprint={summary.adaptation_fingerprint}"
+            f"profile={adaptation_summary.profile_name}, "
+            f"rows={adaptation_summary.dataset_rows}, "
+            f"omitted={adaptation_summary.omitted_rows}, "
+            f"fingerprint={adaptation_summary.adaptation_fingerprint}"
         )
         return 0
 
     if args.command == "verify":
         selected = load_packaged_synthea_profile(args.profile_name)
-        summary = verify_synthea_adaptation(
+        verification_summary = verify_synthea_adaptation(
             args.normalized_directory,
             profile=selected,
         )
         print(
             "Synthea cohort verified: "
-            f"profile={summary.profile_name}, rows={summary.dataset_rows}, "
-            f"fingerprint={summary.adaptation_fingerprint}"
+            f"profile={verification_summary.profile_name}, "
+            f"rows={verification_summary.dataset_rows}, "
+            f"fingerprint={verification_summary.adaptation_fingerprint}"
         )
         return 0
 
     if args.command == "compare":
-        summary = compare_synthea_cohorts(
+        comparison_summary = compare_synthea_cohorts(
             args.cohort_a_directory,
             args.cohort_b_directory,
             args.output_dir,
@@ -213,9 +215,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(
             "Synthea cohort comparison completed: "
-            f"fingerprint={summary.comparison_fingerprint}, "
-            f"overlaps={summary.overlap_counts}, "
-            f"manifest={summary.manifest_path}"
+            f"fingerprint={comparison_summary.comparison_fingerprint}, "
+            f"overlaps={comparison_summary.overlap_counts}, "
+            f"manifest={comparison_summary.manifest_path}"
         )
         return 0
 
@@ -223,7 +225,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         database_url = args.database_url or database_url_from_environment()
         with connect_database(database_url) as connection:
             migrate_database(connection, baseline_existing=args.baseline_existing)
-            summary = load_synthea_cohort_pair(
+            load_summary = load_synthea_cohort_pair(
                 connection,
                 args.cohort_a_directory,
                 args.cohort_b_directory,
@@ -238,10 +240,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         print(
             "Synthea cohort pair loaded: "
-            f"comparison={summary.comparison.comparison_fingerprint}, "
-            f"cohort_a_records={summary.cohort_a_load.records_persisted}, "
-            f"cohort_b_records={summary.cohort_b_load.records_persisted}, "
-            f"load_manifest={summary.load_manifest_path}"
+            f"comparison={load_summary.comparison.comparison_fingerprint}, "
+            f"cohort_a_records={load_summary.cohort_a_load.records_persisted}, "
+            f"cohort_b_records={load_summary.cohort_b_load.records_persisted}, "
+            f"load_manifest={load_summary.load_manifest_path}"
         )
         return 0
 
