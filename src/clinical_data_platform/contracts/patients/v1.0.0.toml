@@ -1,11 +1,11 @@
+not_future_fields = ["birth_date"]
+
 [dataset]
 name = "patients"
 version = "1.0.0"
 primary_key = "patient_id"
 patient_id_column = "patient_id"
 allow_extra_columns = false
-
-not_future_fields = ["birth_date"]
 
 [[order_rules]]
 earlier_field = "birth_date"
