@@ -10,6 +10,11 @@ from clinical_data_platform.database import persist_dataset_validation_outputs
 from clinical_data_platform.history import get_clinical_history_policy
 from clinical_data_platform.migration import migrate_database
 from clinical_data_platform.pipeline import run_dataset_validation
+from clinical_data_platform.run_audit import (
+    get_pipeline_run,
+    list_pipeline_run_events,
+    validate_pipeline_run_audit,
+)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_DIRECTORY = REPOSITORY_ROOT / "data" / "sample"
@@ -188,7 +193,7 @@ def test_patient_snapshot_creates_history_only_when_business_data_changes(
 
 
 @pytest.mark.integration
-def test_immutable_event_accepts_exact_duplicate_and_rejects_conflict(
+def test_immutable_event_accepts_exact_duplicate_and_audits_conflict(
     tmp_path: Path,
     clean_database_connection: psycopg.Connection[Any],
 ) -> None:
@@ -261,10 +266,22 @@ def test_immutable_event_accepts_exact_duplicate_and_rejects_conflict(
         WHERE encounter_id = 'E001'
         """
     ).fetchone()
-    failed_run = connection.execute(
-        "SELECT COUNT(*) FROM audit.pipeline_runs WHERE run_id = %s",
-        (conflict.run_id,),
-    ).fetchone()
+    snapshot = get_pipeline_run(connection, conflict.run_id)
+    events = list_pipeline_run_events(connection, conflict.run_id)
+    audit = validate_pipeline_run_audit(connection, conflict.run_id)
 
     assert preserved_event == original_event
-    assert failed_run == (0,)
+    assert snapshot.status == "failed"
+    assert snapshot.attempt_count == 1
+    assert snapshot.failure_message is not None
+    assert "Immutable encounter conflict" in snapshot.failure_message
+    assert [event.to_status for event in events] == [
+        "created",
+        "raw_captured",
+        "validating",
+        "validated",
+        "loading",
+        "failed",
+    ]
+    assert audit.current_status == "failed"
+    assert audit.event_count == 6
