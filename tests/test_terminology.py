@@ -10,6 +10,11 @@ from clinical_data_platform.database import persist_dataset_validation_outputs
 from clinical_data_platform.migration import migrate_database
 from clinical_data_platform.pipeline import run_dataset_validation
 from clinical_data_platform.registry import dataset_names
+from clinical_data_platform.run_audit import (
+    get_pipeline_run,
+    list_pipeline_run_events,
+    validate_pipeline_run_audit,
+)
 from clinical_data_platform.terminology import (
     list_terminology_systems,
     resolve_terminology_concept,
@@ -182,7 +187,7 @@ def test_six_entity_demo_rows_are_bound_to_active_normalized_concepts(
 
 
 @pytest.mark.integration
-def test_unknown_code_is_rejected_and_the_dataset_transaction_rolls_back(
+def test_unknown_code_rolls_back_clinical_rows_but_preserves_failure_audit(
     tmp_path: Path,
     clean_database_connection: psycopg.Connection[Any],
 ) -> None:
@@ -231,10 +236,22 @@ def test_unknown_code_is_rejected_and_the_dataset_transaction_rolls_back(
     diagnosis_count = connection.execute(
         "SELECT COUNT(*) FROM clinical.diagnoses"
     ).fetchone()
-    failed_run = connection.execute(
-        "SELECT COUNT(*) FROM audit.pipeline_runs WHERE run_id = %s",
-        (validation.run_id,),
-    ).fetchone()
+    snapshot = get_pipeline_run(connection, validation.run_id)
+    events = list_pipeline_run_events(connection, validation.run_id)
+    audit = validate_pipeline_run_audit(connection, validation.run_id)
 
     assert diagnosis_count == (0,)
-    assert failed_run == (0,)
+    assert snapshot.status == "failed"
+    assert snapshot.failure_message is not None
+    assert "Unknown terminology concept" in snapshot.failure_message
+    assert snapshot.failure_code is not None
+    assert [event.to_status for event in events] == [
+        "created",
+        "raw_captured",
+        "validating",
+        "validated",
+        "loading",
+        "failed",
+    ]
+    assert audit.current_status == "failed"
+    assert audit.event_count == 6
