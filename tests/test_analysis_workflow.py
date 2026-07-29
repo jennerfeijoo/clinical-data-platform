@@ -10,6 +10,7 @@ from clinical_data_platform.cohort import build_hypertension_cohort
 from clinical_data_platform.database import persist_dataset_validation_outputs
 from clinical_data_platform.migration import migrate_database
 from clinical_data_platform.pipeline import run_dataset_validation
+from clinical_data_platform.raw import verify_raw_receipt
 from clinical_data_platform.registry import dataset_names
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -22,16 +23,22 @@ def test_full_clinical_pipeline_builds_expected_hypertension_features(
     tmp_path: Path,
     clean_database_connection: psycopg.Connection[Any],
 ) -> None:
+    raw_root = tmp_path / "raw"
     processed = tmp_path / "processed"
     summaries = {
         dataset: run_dataset_validation(
             dataset,
             SAMPLE_DIRECTORY / f"{dataset}.csv",
             processed / dataset,
+            raw_root=raw_root,
             reference_date=date(2026, 7, 29),
         )
         for dataset in dataset_names()
     }
+
+    for summary in summaries.values():
+        receipt = verify_raw_receipt(raw_root, summary.raw_manifest_relative_path)
+        assert receipt.sha256 == summary.source_sha256
 
     connection = clean_database_connection
     migrate_database(connection)
@@ -40,6 +47,7 @@ def test_full_clinical_pipeline_builds_expected_hypertension_features(
             connection,
             dataset,
             processed / dataset,
+            raw_root=raw_root,
         )
         for dataset in dataset_names()
     }
