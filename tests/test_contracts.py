@@ -21,8 +21,10 @@ def test_manifest_loads_every_active_versioned_contract() -> None:
         "encounters",
         "diagnoses",
         "observations",
+        "medications",
+        "procedures",
     )
-    assert [contract.version for contract in contracts] == ["1.0.0"] * 4
+    assert [contract.version for contract in contracts] == ["1.0.0"] * 6
     assert all(len(contract.sha256) == 64 for contract in contracts)
     assert all(contract.resource_path.endswith("v1.0.0.toml") for contract in contracts)
 
@@ -69,6 +71,34 @@ def test_observation_contract_executes_measurement_profiles() -> None:
     assert len(result.invalid_records) == 1
     assert {error.rule for error in result.errors} == {"plausible_range"}
     assert result.errors[0].entity_id == "O014"
+
+
+def test_medication_contract_executes_optional_and_temporal_rules() -> None:
+    result = validate_records_against_contract(
+        read_csv_records(SAMPLE_DIRECTORY / "medications.csv"),
+        load_contract("medications"),
+        reference_date=date(2026, 7, 29),
+    )
+
+    assert result.rows_received == 7
+    assert len(result.valid_records) == 6
+    assert len(result.invalid_records) == 1
+    assert {error.rule for error in result.errors} == {"temporal_consistency"}
+    assert result.errors[0].entity_id == "M007"
+
+
+def test_procedure_contract_executes_vocabulary_rules() -> None:
+    result = validate_records_against_contract(
+        read_csv_records(SAMPLE_DIRECTORY / "procedures.csv"),
+        load_contract("procedures"),
+        reference_date=date(2026, 7, 29),
+    )
+
+    assert result.rows_received == 7
+    assert len(result.valid_records) == 6
+    assert len(result.invalid_records) == 1
+    assert {error.rule for error in result.errors} == {"allowed_values"}
+    assert result.errors[0].entity_id == "PR007"
 
 
 def test_contract_rejects_an_unexpected_column() -> None:
