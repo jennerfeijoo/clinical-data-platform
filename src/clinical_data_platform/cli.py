@@ -454,7 +454,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "synthea-generate":
         profile = load_synthea_profile(args.profile)
-        summary = generate_synthea_dataset(
+        generation_summary = generate_synthea_dataset(
             args.workspace,
             profile=profile,
             checkout_directory=args.checkout,
@@ -462,17 +462,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(
             "Synthea generation completed: "
-            f"profile={summary.profile_name}, "
-            f"upstream_commit={summary.upstream_commit}, "
-            f"files={len(summary.files)}, "
-            f"fingerprint={summary.dataset_fingerprint}, "
-            f"manifest={summary.manifest_path}"
+            f"profile={generation_summary.profile_name}, "
+            f"upstream_commit={generation_summary.upstream_commit}, "
+            f"files={len(generation_summary.files)}, "
+            f"fingerprint={generation_summary.dataset_fingerprint}, "
+            f"manifest={generation_summary.manifest_path}"
         )
         return 0
 
     if args.command == "synthea-adapt":
         profile = load_synthea_profile(args.profile)
-        summary = adapt_synthea_csv(
+        adaptation_summary = adapt_synthea_csv(
             args.csv_directory,
             args.output_dir,
             profile=profile,
@@ -481,22 +481,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(
             "Synthea adaptation completed: "
-            f"profile={summary.profile_name}, "
-            f"rows={summary.dataset_rows}, "
-            f"omitted={summary.omitted_rows}, "
-            f"terminology={summary.terminology_concepts}, "
-            f"fingerprint={summary.adaptation_fingerprint}"
+            f"profile={adaptation_summary.profile_name}, "
+            f"rows={adaptation_summary.dataset_rows}, "
+            f"omitted={adaptation_summary.omitted_rows}, "
+            f"terminology={adaptation_summary.terminology_concepts}, "
+            f"fingerprint={adaptation_summary.adaptation_fingerprint}"
         )
         return 0
 
     if args.command == "synthea-verify":
         profile = load_synthea_profile(args.profile)
-        summary = verify_synthea_adaptation(args.output_directory, profile=profile)
+        verification_summary = verify_synthea_adaptation(
+            args.output_directory,
+            profile=profile,
+        )
         print(
             "Synthea adaptation verified: "
-            f"profile={summary.profile_name}, "
-            f"rows={summary.dataset_rows}, "
-            f"fingerprint={summary.adaptation_fingerprint}"
+            f"profile={verification_summary.profile_name}, "
+            f"rows={verification_summary.dataset_rows}, "
+            f"fingerprint={verification_summary.adaptation_fingerprint}"
         )
         return 0
 
@@ -504,7 +507,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         profile = load_synthea_profile(args.profile)
         with connect_database(_database_url(args.database_url)) as connection:
             migrate_database(connection, baseline_existing=args.baseline_existing)
-            summary = load_adapted_synthea_dataset(
+            load_summary = load_adapted_synthea_dataset(
                 connection,
                 args.normalized_directory,
                 args.processed_root,
@@ -513,9 +516,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         print(
             "Synthea load completed: "
-            f"terminology_inserted={summary.terminology.concepts_inserted}, "
-            f"terminology_existing={summary.terminology.concepts_existing}, "
-            f"records={summary.records_persisted}"
+            f"terminology_inserted={load_summary.terminology.concepts_inserted}, "
+            f"terminology_existing={load_summary.terminology.concepts_existing}, "
+            f"records={load_summary.records_persisted}"
         )
         return 0
 
