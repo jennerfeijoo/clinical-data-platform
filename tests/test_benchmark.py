@@ -25,7 +25,7 @@ REFERENCE_DIRECTORY = (
     REPOSITORY_ROOT
     / "benchmarks"
     / "loading"
-    / "github-actions-run-30466706538"
+    / "github-actions-run-30470147850"
 )
 
 
@@ -118,21 +118,28 @@ def test_committed_reference_evidence_is_internally_consistent() -> None:
     source_artifact_bytes = committed_bytes.replace(b"\n", b"\r\n")
     source_trials_sha256 = hashlib.sha256(source_artifact_bytes).hexdigest()
     assert document["schema_version"] == BENCHMARK_SCHEMA_VERSION
-    assert document["evidence"]["workflow_run_id"] == "30466706538"
+    assert document["evidence"]["workflow_run_id"] == "30470147850"
     assert document["evidence"]["source_trials_sha256"] == source_trials_sha256
     assert document["configuration"]["patient_counts"] == [250, 1000, 2500]
-    assert document["configuration"]["repetitions"] == 5
+    assert document["configuration"]["repetitions"] == 6
     assert all(item["copy_speedup"] > 1 for item in document["comparisons"])
 
     with trials_path.open(encoding="utf-8", newline="") as file:
         trials = list(csv.DictReader(file))
 
-    assert len(trials) == 30
+    assert len(trials) == 36
     for patient_count in ("250", "1000", "2500"):
         size_trials = [trial for trial in trials if trial["patient_count"] == patient_count]
-        assert len(size_trials) == 10
+        assert len(size_trials) == 12
         assert {trial["method"] for trial in size_trials} == {"copy", "executemany"}
         assert len({trial["database_fingerprint"] for trial in size_trials}) == 1
+        starting_methods = {
+            trial["repetition"]: trial["method"]
+            for trial in size_trials
+            if trial["order_position"] == "1"
+        }
+        assert list(starting_methods.values()).count("copy") == 3
+        assert list(starting_methods.values()).count("executemany") == 3
 
 
 @pytest.mark.integration
