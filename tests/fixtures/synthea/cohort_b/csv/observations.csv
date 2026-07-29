@@ -1,0 +1,5 @@
+DATE,PATIENT,ENCOUNTER,CATEGORY,CODE,DESCRIPTION,VALUE,UNITS,TYPE
+2025-03-15T08:10:00Z,P101,E101,vital-signs,8480-6,Systolic Blood Pressure,138,mm[Hg],numeric
+2025-03-15T08:10:00Z,P101,E101,vital-signs,8462-4,Diastolic Blood Pressure,86,mm[Hg],numeric
+2025-04-20T14:10:00Z,P102,E102,vital-signs,8867-4,Heart rate,82,/min,numeric
+2025-04-20T14:10:00Z,P102,E102,laboratory,29463-7,Body Weight,79,kg,numeric

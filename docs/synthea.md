@@ -1,39 +1,40 @@
-# Reproducible Synthea dataset
+# Reproducible Synthea generation and adaptation
 
 ## Scope
 
-This workflow generates a synthetic population with a pinned Synthea release, records the exact generation inputs, adapts six upstream CSV files into the platform contracts, and verifies every source and output artifact by SHA-256.
+This workflow generates synthetic populations with pinned Synthea profiles, records the exact generation inputs, adapts six upstream CSV files into the platform contracts, and verifies every source and output artifact by SHA-256.
 
-Synthea produces synthetic records. This workflow must not be interpreted as a source of real patient data, epidemiological ground truth, or clinically representative prevalence for a target population.
+Synthea produces synthetic records. These workflows must not be interpreted as sources of real patient data, epidemiological ground truth, clinically representative prevalence, or evidence suitable for patient care.
 
-## Reproducibility profile
+## Packaged profiles
 
-The packaged profile is:
+The package now includes two profiles:
 
 ```text
-src/clinical_data_platform/synthea_profiles/reproducible_small.toml
+src/clinical_data_platform/synthea_profiles/
+├── reproducible_small.toml
+└── reproducible_small_cohort_b.toml
 ```
 
-It pins:
+| Control | `synthea-us-small-v1` | `synthea-us-small-cohort-b-v1` |
+|---|---|---|
+| Synthea release | `v4.0.0` | `v4.0.0` |
+| Population | 100 | 100 |
+| Random seed | 20260729 | 20260829 |
+| Clinician seed | 20260730 | 20260830 |
+| Reference date | 2026-07-29 | 2026-07-29 |
+| Geography | Massachusetts | Massachusetts |
+| Generator threads | 1 | 1 |
+| Years of history | 0 | 0 |
+| Export | six CSV files | six CSV files |
 
-| Control | Value |
-|---|---|
-| profile | `synthea-us-small-v1` |
-| Synthea release | `v4.0.0` |
-| population | 100 |
-| random seed | 20260729 |
-| clinician seed | 20260730 |
-| reference date | 2026-07-29 |
-| geography | Massachusetts |
-| generator threads | 1 |
-| years of history | 0 |
-| export format | CSV |
+The original `clinical-data` Synthea commands continue to default to `synthea-us-small-v1`. The `clinical-data-cohort` entrypoint selects either packaged profile by stable name.
 
 Single-thread generation is deliberate. Parallel generation can make output ordering and some run-scoped identifiers harder to reproduce exactly.
 
 ## Why a tag is not enough
 
-The profile pins `v4.0.0`, but the generation manifest also records the resolved upstream Git commit. This allows a previous result to retain the exact source identity even if an upstream ref were later moved or recreated.
+Each profile pins `v4.0.0`, but the generation manifest also records the resolved upstream Git commit. This allows a previous result to retain the exact source identity even if an upstream ref were later moved or recreated.
 
 The checkout must:
 
@@ -59,7 +60,7 @@ The command pins:
 --exporter.csv.included_files=...
 ```
 
-FHIR, hospital FHIR, practitioner FHIR, and metadata exporters are disabled for this workflow. Only the six required CSV files are requested.
+FHIR, hospital FHIR, practitioner FHIR, and metadata exporters are disabled. Only the six required CSV files are requested.
 
 ## Source files
 
@@ -109,7 +110,7 @@ normalized/
 └── synthea-adaptation-manifest.json
 ```
 
-The output files match the existing executable contracts. No Synthea-specific validation or persistence pipeline was added.
+The output files match the existing executable contracts. There is no Synthea-specific validation or persistence path.
 
 ### Patients
 
@@ -138,7 +139,7 @@ source row number
 canonical source row content
 ```
 
-Supported source systems are normalized to the contract names `SNOMED` or `ICD10`.
+Supported source systems are normalized to `SNOMED` or `ICD10`.
 
 ### Observations
 
@@ -150,11 +151,11 @@ The current platform contract intentionally accepts only:
 | 8462-4 | `DIASTOLIC_BP` | `mmHg` |
 | 8867-4 | `HEART_RATE` | `bpm` |
 
-Other Synthea observations are omitted and counted in the adaptation manifest. They are not silently converted into the narrow observation contract.
+Other observations are omitted and counted in the adaptation manifest. They are not silently converted into the narrow observation contract.
 
 ### Medications
 
-The Synthea medication CSV does not include a code-system column. The adapter treats its medication `CODE` as RxNorm, matching Synthea's native medication export convention.
+The Synthea medication CSV does not include a code-system column. The adapter treats `CODE` as RxNorm, matching Synthea's native CSV convention.
 
 Status is derived as:
 
@@ -167,7 +168,7 @@ Dose and route remain empty because the CSV source does not contain a reliable s
 
 ### Procedures
 
-Supported source systems are normalized to `SNOMED`, `CPT`, or `ICD10PCS`. Adapted procedures are marked `COMPLETED` because the CSV row represents an exported performed procedure event.
+Supported source systems are normalized to `SNOMED`, `CPT`, or `ICD10PCS`. Adapted procedures are marked `COMPLETED` because each CSV row represents an exported performed procedure event.
 
 ## Parent integrity
 
@@ -183,14 +184,14 @@ Rows that violate this condition are omitted with an explicit reason count.
 
 The adapter writes source concepts used by diagnoses, medications, and procedures to `terminology.csv`.
 
-During `synthea-load`:
+During loading:
 
 - existing concepts are reused;
 - missing concepts are inserted into the existing canonical system;
 - inserted concepts are marked `unverified`;
 - a code cannot be imported into a conflicting clinical domain.
 
-This supports loading the generated population without claiming that every source code was independently verified against an official terminology release.
+This supports generated populations without claiming that every source code was independently verified against an official terminology release.
 
 ## Adaptation manifest
 
@@ -208,15 +209,15 @@ adaptation fingerprint
 
 The adaptation fingerprint covers source fingerprints, output fingerprints, adapter version, profile hash, and omitted-row counts.
 
-## Commands
+## Original single-profile commands
 
-Inspect the profile:
+Inspect the default profile:
 
 ```powershell
 clinical-data synthea-profile
 ```
 
-Generate and adapt with the packaged workflow:
+Generate and adapt the original profile:
 
 ```powershell
 .\scripts\generate_synthea.ps1
@@ -231,49 +232,64 @@ clinical-data synthea-generate `
 clinical-data synthea-adapt `
   data/synthea/synthea-us-small-v1/generated/csv `
   --output-dir data/synthea/synthea-us-small-v1/normalized `
-  --generation-manifest data/synthea/synthea-us-small-v1/synthea-generation-manifest.json
+  --generation-manifest `
+    data/synthea/synthea-us-small-v1/synthea-generation-manifest.json
 
 clinical-data synthea-verify `
   data/synthea/synthea-us-small-v1/normalized
 ```
 
-Load the six datasets:
+## Named profile commands
+
+List both packaged profiles:
 
 ```powershell
-clinical-data synthea-load `
-  data/synthea/synthea-us-small-v1/normalized `
-  --processed-root data/processed/synthea `
-  --raw-root data/raw
+clinical-data-cohort list-profiles
 ```
 
-The load command uses the existing immutable raw capture, executable contracts, execution journals, structured logging, terminology layer, durable failure audit, and PostgreSQL persistence.
+Inspect cohort B:
+
+```powershell
+clinical-data-cohort profile synthea-us-small-cohort-b-v1
+```
+
+Generate and adapt both profiles:
+
+```powershell
+.\scripts\generate_synthea_cohorts.ps1
+```
+
+The two-cohort comparison and pair-loading protocol is documented in [`synthea-cohorts.md`](synthea-cohorts.md).
 
 ## What CI verifies
 
 Normal CI does not clone and execute the full Java generator. It verifies:
 
-- the packaged profile is installed;
-- the profile contains the expected pinned controls;
+- both packaged profiles;
+- the controlled equality of study-design parameters;
+- distinct patient and clinician seeds;
 - exact upstream CSV headers;
 - deterministic adaptation;
 - manifest verification and tamper detection;
 - contract validity of every adapted output;
 - terminology import;
-- end-to-end loading through PostgreSQL.
+- zero identifier overlap between two fixtures;
+- end-to-end pair loading through PostgreSQL.
 
-A small checked-in fixture is used for these tests. It is a schema and behavior fixture, not the final 100-patient generated dataset.
+The checked-in fixtures are schema and behavior fixtures, not the final 100-patient generated datasets.
 
 ## Reproducibility claim
 
-The implementation can verify exact repeatability when two executions produce the same source-file hashes and dataset fingerprint. Fixed inputs substantially reduce variability, but the repository does not claim that every future operating system, JVM, or upstream dependency environment will always produce byte-identical outputs. The manifest exposes such differences rather than hiding them.
+The implementation can verify exact repeatability when two executions produce the same source-file hashes and dataset fingerprint. Fixed inputs substantially reduce variability, but the repository does not claim that every future operating system, JVM, or upstream dependency environment will always produce byte-identical output.
+
+The manifests expose differences rather than hiding them.
 
 ## Current limits
 
-- the adapter supports only six Synthea CSV files;
-- observations are intentionally restricted to three vital-sign concepts;
+- the adapter supports six Synthea CSV files;
+- observations are restricted to three vital-sign concepts;
 - terminology entries absent from the local subset are imported as unverified;
 - no upstream Java generation occurs in standard CI;
 - generated workspaces are ignored by Git;
-- row-wise PostgreSQL loading remains in use;
-- bulk `COPY` and performance benchmarking are the next milestones;
+- pair loading uses twelve existing per-dataset execution lifecycles rather than one global transaction;
 - no epidemiological or clinical-validity claim is made.
