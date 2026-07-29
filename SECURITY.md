@@ -23,14 +23,24 @@ Do not include identifiable patient information. The project is synthetic-only a
 
 The repository runs:
 
-- `pip-audit` for known Python dependency vulnerabilities;
-- Bandit for Python static analysis;
+- `pip-audit` on every pull request, push, weekly schedule, and manual security run;
+- Bandit for Python static analysis against a narrow reviewed baseline;
 - CodeQL with the extended Python security query suite;
-- GitHub dependency review for pull-request dependency changes;
 - Trivy for high and critical vulnerabilities in the built container image;
 - Dependabot for Python, GitHub Actions, and Docker update proposals.
 
+The dedicated GitHub Dependency Review Action is not used because Dependency Graph is not enabled for this repository. Pull requests are instead blocked when the complete resolved Python environment contains a known vulnerability. This audits the proposed head environment but does not provide a base-versus-head dependency diff.
+
 GitHub Actions are pinned to full commit SHAs and updated through reviewed pull requests.
+
+## Reviewed Bandit baseline
+
+The baseline contains two B608 findings where SQL fragments come exclusively from internal constants:
+
+- an optional `FOR UPDATE` clause selected from a boolean;
+- clinical table and identifier names selected from the fixed six-entity registry.
+
+The baseline suppresses only those recorded findings. New findings, changed locations, or additional B608 results remain blocking.
 
 ## Scope limits
 
