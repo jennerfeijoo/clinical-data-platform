@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clinical-data-platform"
-version = "0.16.0"
-description = "An auditable synthetic clinical data platform with reproducible cohort quality reports, governed PostgreSQL loading, terminology normalization, and immutable lineage."
+version = "0.17.0"
+description = "An auditable synthetic clinical data platform with mandatory behavioral test coverage, reproducible cohort quality reports, governed PostgreSQL loading, terminology normalization, and immutable lineage."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -43,10 +43,18 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+addopts = "-ra --strict-markers --cov=clinical_data_platform --cov-report=term-missing --cov-fail-under=90"
 markers = [
     "integration: tests that require a running PostgreSQL instance"
 ]
+
+[tool.coverage.run]
+source = ["clinical_data_platform"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = false
 
 [tool.ruff]
 line-length = 101
