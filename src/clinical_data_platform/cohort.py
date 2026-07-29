@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,6 +13,14 @@ from uuid import UUID, uuid4
 
 import psycopg
 from psycopg.types.json import Jsonb
+
+from clinical_data_platform.structured_logging import (
+    bind_log_context,
+    emit_log,
+    ensure_correlation_id,
+    get_logger,
+    log_operation,
+)
 
 REQUIRED_SOURCE_DATASETS = frozenset(
     {"patients", "encounters", "diagnoses", "observations"}
@@ -28,6 +37,7 @@ HYPERTENSION_FIELDS = (
     "prior_diagnosis_count_365d",
     "follow_up_days",
 )
+LOGGER = get_logger("cohort")
 
 
 class CohortBuildError(RuntimeError):
@@ -89,89 +99,145 @@ def build_hypertension_cohort(
     if not sql_path.exists():
         raise FileNotFoundError(f"Cohort SQL file not found: {sql_path}")
 
-    source_runs = _source_runs(connection)
-    cohort_run_id = uuid4()
-    generated_at = datetime.now(UTC)
-    parameters = {
-        "minimum_age": minimum_age,
-        "minimum_follow_up_days": minimum_follow_up_days,
-        "baseline_window_days": baseline_window_days,
-    }
-    cohort_sql = sql_path.read_text(encoding="utf-8")
-
-    with connection.transaction():
-        connection.execute(
-            """
-            INSERT INTO audit.cohort_runs (
-                cohort_run_id, cohort_name, definition_version,
-                parameters, row_count, generated_at
-            )
-            VALUES (%s, %s, %s, %s, 0, %s)
-            """,
-            (
-                cohort_run_id,
-                "hypertension",
-                HYPERTENSION_DEFINITION_VERSION,
-                Jsonb(parameters),
-                generated_at,
-            ),
+    with ensure_correlation_id():
+        emit_log(
+            LOGGER,
+            logging.INFO,
+            "cohort.run.started",
+            "Started hypertension cohort build.",
+            cohort_name="hypertension",
+            definition_version=HYPERTENSION_DEFINITION_VERSION,
+            minimum_age=minimum_age,
+            minimum_follow_up_days=minimum_follow_up_days,
+            baseline_window_days=baseline_window_days,
         )
-        with connection.cursor() as cursor:
-            cursor.executemany(
-                """
-                INSERT INTO audit.cohort_source_runs (cohort_run_id, source_run_id)
-                VALUES (%s, %s)
-                """,
-                [(cohort_run_id, run_id) for run_id, _ in source_runs],
+        with log_operation(
+            LOGGER,
+            "cohort.source_runs",
+            operation="resolve_source_runs",
+            stage="source_resolution",
+            cohort_name="hypertension",
+        ) as source_log:
+            source_runs = _source_runs(connection)
+            source_log["source_run_count"] = len(source_runs)
+            source_log["source_datasets"] = sorted(dataset for _, dataset in source_runs)
+
+        cohort_run_id = uuid4()
+        generated_at = datetime.now(UTC)
+        parameters = {
+            "minimum_age": minimum_age,
+            "minimum_follow_up_days": minimum_follow_up_days,
+            "baseline_window_days": baseline_window_days,
+        }
+        cohort_sql = sql_path.read_text(encoding="utf-8")
+
+        with bind_log_context(
+            cohort_run_id=str(cohort_run_id),
+            cohort_name="hypertension",
+        ):
+            with log_operation(
+                LOGGER,
+                "cohort.database_build",
+                operation="execute_cohort_sql",
+                stage="database_build",
+                definition_version=HYPERTENSION_DEFINITION_VERSION,
+                source_run_count=len(source_runs),
+            ) as database_log:
+                with connection.transaction():
+                    connection.execute(
+                        """
+                        INSERT INTO audit.cohort_runs (
+                            cohort_run_id, cohort_name, definition_version,
+                            parameters, row_count, generated_at
+                        )
+                        VALUES (%s, %s, %s, %s, 0, %s)
+                        """,
+                        (
+                            cohort_run_id,
+                            "hypertension",
+                            HYPERTENSION_DEFINITION_VERSION,
+                            Jsonb(parameters),
+                            generated_at,
+                        ),
+                    )
+                    with connection.cursor() as cursor:
+                        cursor.executemany(
+                            """
+                            INSERT INTO audit.cohort_source_runs (
+                                cohort_run_id,
+                                source_run_id
+                            )
+                            VALUES (%s, %s)
+                            """,
+                            [(cohort_run_id, run_id) for run_id, _ in source_runs],
+                        )
+
+                    rows = connection.execute(
+                        cohort_sql,
+                        {
+                            "cohort_run_id": cohort_run_id,
+                            "minimum_age": minimum_age,
+                            "minimum_follow_up_days": minimum_follow_up_days,
+                            "baseline_window_days": baseline_window_days,
+                        },
+                        prepare=False,
+                    ).fetchall()
+                    connection.execute(
+                        """
+                        UPDATE audit.cohort_runs
+                        SET row_count = %s
+                        WHERE cohort_run_id = %s
+                        """,
+                        (len(rows), cohort_run_id),
+                    )
+                database_log["row_count"] = len(rows)
+
+            output_directory.mkdir(parents=True, exist_ok=True)
+            features_path = output_directory / "hypertension_features.csv"
+            metadata_path = output_directory / "hypertension_cohort_metadata.json"
+
+            with log_operation(
+                LOGGER,
+                "cohort.export",
+                operation="export_cohort_outputs",
+                stage="export",
+                row_count=len(rows),
+            ) as export_log:
+                with features_path.open("w", encoding="utf-8", newline="") as file:
+                    writer = csv.writer(file)
+                    writer.writerow(HYPERTENSION_FIELDS)
+                    writer.writerows(rows)
+
+                metadata = {
+                    "cohort_run_id": str(cohort_run_id),
+                    "cohort_name": "hypertension",
+                    "definition_version": HYPERTENSION_DEFINITION_VERSION,
+                    "generated_at": generated_at.isoformat(),
+                    "parameters": parameters,
+                    "row_count": len(rows),
+                    "source_run_ids": [str(run_id) for run_id, _ in source_runs],
+                    "output": str(features_path),
+                }
+                with metadata_path.open("w", encoding="utf-8") as file:
+                    json.dump(metadata, file, indent=2, sort_keys=True)
+                    file.write("\n")
+                export_log["features_file"] = features_path.name
+                export_log["metadata_file"] = metadata_path.name
+
+            emit_log(
+                LOGGER,
+                logging.INFO,
+                "cohort.run.completed",
+                "Completed hypertension cohort build.",
+                outcome="success",
+                row_count=len(rows),
+                definition_version=HYPERTENSION_DEFINITION_VERSION,
             )
-
-        rows = connection.execute(
-            cohort_sql,
-            {
-                "cohort_run_id": cohort_run_id,
-                "minimum_age": minimum_age,
-                "minimum_follow_up_days": minimum_follow_up_days,
-                "baseline_window_days": baseline_window_days,
-            },
-            prepare=False,
-        ).fetchall()
-        connection.execute(
-            """
-            UPDATE audit.cohort_runs
-            SET row_count = %s
-            WHERE cohort_run_id = %s
-            """,
-            (len(rows), cohort_run_id),
-        )
-
-    output_directory.mkdir(parents=True, exist_ok=True)
-    features_path = output_directory / "hypertension_features.csv"
-    metadata_path = output_directory / "hypertension_cohort_metadata.json"
-
-    with features_path.open("w", encoding="utf-8", newline="") as file:
-        writer = csv.writer(file)
-        writer.writerow(HYPERTENSION_FIELDS)
-        writer.writerows(rows)
-
-    metadata = {
-        "cohort_run_id": str(cohort_run_id),
-        "cohort_name": "hypertension",
-        "definition_version": HYPERTENSION_DEFINITION_VERSION,
-        "generated_at": generated_at.isoformat(),
-        "parameters": parameters,
-        "row_count": len(rows),
-        "source_run_ids": [str(run_id) for run_id, _ in source_runs],
-        "output": str(features_path),
-    }
-    with metadata_path.open("w", encoding="utf-8") as file:
-        json.dump(metadata, file, indent=2, sort_keys=True)
-        file.write("\n")
-
-    return CohortSummary(
-        cohort_run_id=cohort_run_id,
-        cohort_name="hypertension",
-        definition_version=HYPERTENSION_DEFINITION_VERSION,
-        row_count=len(rows),
-        features_path=features_path,
-        metadata_path=metadata_path,
-    )
+            return CohortSummary(
+                cohort_run_id=cohort_run_id,
+                cohort_name="hypertension",
+                definition_version=HYPERTENSION_DEFINITION_VERSION,
+                row_count=len(rows),
+                features_path=features_path,
+                metadata_path=metadata_path,
+            )

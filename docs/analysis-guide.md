@@ -2,15 +2,52 @@
 
 This sequence reviews the repository after running the bundled demonstration.
 
-## 1. Run the complete workflow
+## 1. Run the complete workflow with captured logs
+
+PowerShell:
 
 ```powershell
-clinical-data run-demo --repository-root .
+$env:CLINICAL_DATA_LOG_LEVEL = "INFO"
+$env:CLINICAL_DATA_LOG_FORMAT = "json"
+clinical-data run-demo --repository-root . 2> data/clinical-data.jsonl
 ```
 
-The workflow captures six raw datasets, writes local execution journals, executes contracts, migrates PostgreSQL through V008, imports execution events, resolves coded concepts, persists accepted rows, and builds the hypertension cohort.
+The workflow captures six raw datasets, writes local execution journals, executes contracts, migrates PostgreSQL through V008, imports execution events, resolves coded concepts, persists accepted rows, builds the hypertension cohort, and emits correlated operational telemetry.
 
-## 2. Verify migration state
+## 2. Inspect the structured log envelope
+
+```powershell
+Get-Content data/clinical-data.jsonl | Select-Object -First 5
+```
+
+Each line must parse as JSON and contain:
+
+```text
+schema_version = 1.0.0
+timestamp
+event
+component
+level
+message
+correlation_id
+```
+
+The complete demo should use one `correlation_id` across validation, persistence, and cohort operations. Individual datasets should have distinct `run_id` values.
+
+Useful events:
+
+```text
+cli.command.started
+pipeline.validation.completed
+persistence.transaction.completed
+cohort.database_build.completed
+demo.run.completed
+cli.command.completed
+```
+
+Confirm that operation completion records contain `duration_ms` and that logs do not contain patient identifiers or row values.
+
+## 3. Verify migration state
 
 ```powershell
 clinical-data database-status
@@ -34,9 +71,9 @@ FROM public.schema_migrations
 ORDER BY version;
 ```
 
-V008 should be `add_execution_lifecycle_audit`.
+V008 should be `add_execution_lifecycle_audit`. Structured logging does not add V009 because it does not modify persistent schema.
 
-## 3. Inspect raw, processed, and execution artifacts
+## 4. Inspect raw, processed, and execution artifacts
 
 ```text
 data/raw/
@@ -73,7 +110,7 @@ validating
 validated
 ```
 
-## 4. Inspect durable run state
+## 5. Inspect durable run state
 
 ```sql
 SELECT
@@ -95,7 +132,7 @@ ORDER BY updated_at DESC;
 
 After a clean demo, all six runs should be `completed`, each with `attempt_count = 1` and `audit_event_count = 6`.
 
-## 5. Inspect one execution timeline
+## 6. Inspect one execution timeline
 
 ```sql
 SELECT
@@ -129,7 +166,29 @@ Expected clean sequence:
 
 Confirm that every `previous_event_sha256` equals the prior row's `event_sha256`.
 
-## 6. Validate a run programmatically
+## 7. Compare logs with the durable audit
+
+For the same `run_id`, locate log events:
+
+```bash
+jq 'select(.run_id == "<run-uuid>")' data/clinical-data.jsonl
+```
+
+The logs should describe operational stages and durations. PostgreSQL should describe authoritative state transitions and attempts.
+
+Expected distinction:
+
+```text
+log missing
+    → diagnostics may be incomplete
+    → durable audit still establishes final state
+
+audit row missing
+    → the run was not durably registered
+    → a log alone does not prove completed persistence
+```
+
+## 8. Validate a run programmatically
 
 ```python
 from clinical_data_platform.run_audit import validate_pipeline_run_audit
@@ -142,11 +201,11 @@ assert result.attempt_count == 1
 
 This checks counts, heads, identities, transitions, hashes, chain continuity, local-journal boundary, and agreement between current state and final event.
 
-## 7. Demonstrate a durable failure
+## 9. Demonstrate a durable and observable failure
 
 Validate encounters, then try to load them before patients.
 
-Expected outcome:
+Expected database outcome:
 
 ```text
 clinical.encounters = 0
@@ -155,7 +214,24 @@ attempt_count = 1
 failure_code = 23503
 ```
 
-Inspect:
+Expected log events:
+
+```text
+persistence.transaction.failed
+persistence.failure_audited
+```
+
+The failure log should retain:
+
+```text
+error_type
+error_code = 23503
+attempt_number = 1
+```
+
+It must not retain the rejected patient identifier from PostgreSQL `DETAIL` output.
+
+Inspect durable state:
 
 ```sql
 SELECT
@@ -173,7 +249,7 @@ WHERE run_id = '<encounter-run-uuid>';
 
 The clinical transaction must be empty, while the run and failure timeline remain committed.
 
-## 8. Demonstrate retry semantics
+## 10. Demonstrate retry semantics
 
 After the previous failure:
 
@@ -190,9 +266,9 @@ Expected timeline:
 8 completed  attempt 2
 ```
 
-The final projection is completed with `attempt_count = 2`, while event 6 remains historical evidence.
+The logs should include a second persistence attempt with `attempt_number = 2`. The final projection is completed, while event 6 remains historical evidence.
 
-## 9. Inspect active contracts
+## 11. Inspect active contracts
 
 ```powershell
 clinical-data list-contracts
@@ -205,7 +281,7 @@ clinical-data show-contract procedures
 
 Contracts validate source structure and declared categorical systems. They do not contain complete external terminology releases.
 
-## 10. Inspect terminology systems
+## 12. Inspect terminology systems and bindings
 
 ```sql
 SELECT
@@ -221,8 +297,6 @@ ORDER BY code_system_id;
 ```
 
 External systems should be marked as incomplete local subsets.
-
-## 11. Inspect normalized clinical codes
 
 ```sql
 SELECT
@@ -247,7 +321,7 @@ DIASTOLIC_BP → LOINC 8462-4
 HEART_RATE   → LOINC 8867-4
 ```
 
-## 12. Inspect six entity counts
+## 13. Inspect six entity counts
 
 ```sql
 SELECT 'patients' AS dataset, COUNT(*) FROM clinical.patients
@@ -259,7 +333,7 @@ UNION ALL SELECT 'procedures', COUNT(*) FROM clinical.procedures
 ORDER BY dataset;
 ```
 
-Expected counts:
+Expected:
 
 ```text
 patients      5
@@ -270,7 +344,7 @@ medications   6
 procedures    6
 ```
 
-## 13. Inspect patient history
+## 14. Inspect patient history
 
 ```sql
 SELECT
@@ -288,7 +362,7 @@ ORDER BY patient_id, patient_version_id;
 
 Confirm one current version per accepted patient.
 
-## 14. Inspect cohort stability
+## 15. Inspect cohort stability and logs
 
 ```sql
 SELECT *
@@ -298,47 +372,65 @@ ORDER BY patient_id;
 
 Expected patients remain `P001` and `P002`.
 
-## 15. Demonstrate tamper detection
+The logs should include:
+
+```text
+cohort.source_runs.completed
+cohort.database_build.completed
+cohort.export.completed
+cohort.run.completed
+```
+
+Only aggregate `row_count` is logged. The patient values remain in the analytical output, not in telemetry.
+
+## 16. Demonstrate tamper detection
 
 ### Local journal
 
-Change a field in one JSONL line without recalculating hashes. Persistence must reject the journal before registering the run.
+Change a field in one JSONL journal line without recalculating hashes. Persistence must reject the journal before registering the run.
 
 ### PostgreSQL event
 
 Change one stored `event_sha256` and run `validate_pipeline_run_audit`. Validation must reject the durable chain.
 
-The hashes expose inconsistency but do not provide administrator-resistant storage.
+### Structured logs
 
-## 16. Review code in this order
+Logs are not hash chained. Modifying a collected log file is not detected by the application. This is an intentional distinction from the audit design.
 
-1. `execution.py`;
-2. `pipeline.py`;
-3. `V008__add_execution_lifecycle_audit.sql`;
-4. `run_audit.py`;
-5. `database.py`;
-6. `tests/test_pipeline.py`;
-7. `tests/test_run_audit.py`;
-8. conflict tests in history, terminology, and additional entities;
-9. `tests/test_analysis_workflow.py`.
+## 17. Review code in this order
 
-## 17. Key design questions
+1. `structured_logging.py`;
+2. `entrypoint.py`;
+3. `execution.py`;
+4. `pipeline.py`;
+5. `V008__add_execution_lifecycle_audit.sql`;
+6. `run_audit.py`;
+7. `database.py`;
+8. `cohort.py`;
+9. `demo.py`;
+10. `tests/test_structured_logging.py`;
+11. `tests/test_run_audit.py`;
+12. `tests/test_analysis_workflow.py`.
 
+## 18. Key design questions
+
+- Why are logs and the durable audit separate?
+- Why does the CLI use stderr for telemetry and stdout for results?
+- What does a correlation ID identify?
+- Why does a correlation ID not replace `run_id`?
+- Why are durations measured with a monotonic clock?
+- Why is SQLSTATE more useful than matching an error message?
+- Why must clinical values be omitted before redaction?
 - Why is validation `validated` rather than `completed`?
 - Why must the loading state commit before clinical inserts?
-- Why must completed commit with the clinical rows?
-- Why is failed recorded only after the clinical transaction rolls back?
-- What is the difference between a run and an attempt?
-- What is the difference between idempotency and retry?
-- Why are there separate local and durable audit heads?
-- Why are pre-V008 events not reconstructed?
-- What does a hash chain detect, and what can an administrator still do?
+- What is the difference between a run, an attempt, and a correlation?
+- What does a hash chain detect that a normal log file does not?
 
-## 18. Known limitations
+## 19. Known limitations
 
 - local journal rather than WORM storage;
-- no structured application logging or external log shipping;
-- no distributed tracing, metrics, or alerting;
+- structured stderr logs without centralized shipping or managed retention;
+- no distributed tracing, metrics, dashboards, or alerting;
 - no scheduler heartbeat or stale-loading recovery;
 - small terminology subsets;
 - small synthetic fixtures;

@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: postgresql://clinical_user:clinical_password@localhost:5432/clinical_data
+      CLINICAL_DATA_LOG_LEVEL: INFO
+      CLINICAL_DATA_LOG_FORMAT: json
 
     services:
       postgres:
@@ -43,6 +45,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
+
+      - name: Exercise structured logging
+        run: |
+          LOG_FILE="$RUNNER_TEMP/clinical-data.jsonl"
+          clinical-data validate-contracts > "$RUNNER_TEMP/contracts.txt" 2> "$LOG_FILE"
+          python -c "import json, pathlib, sys; docs=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line]; assert docs; assert all(d['schema_version']=='1.0.0' for d in docs); assert docs[0]['event']=='cli.command.started'; assert docs[-1]['event']=='cli.command.completed'; assert len({d['correlation_id'] for d in docs})==1" "$LOG_FILE"
 
       - name: Validate packaged contracts
         run: clinical-data validate-contracts
