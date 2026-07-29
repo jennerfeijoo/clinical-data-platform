@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.19.0
+
+- added a dedicated security workflow for dependency review, Python dependency auditing, Bandit, CodeQL, and Trivy container scanning;
+- added CycloneDX SBOM and JSON scan artifacts for reproducible security evidence;
+- configured weekly Dependabot updates for Python, GitHub Actions, and Docker;
+- pinned every external GitHub Action to a full commit SHA and added a policy test that rejects mutable references;
+- added a repository security-reporting policy and technical documentation in English and Spanish;
+- made known high or critical dependency and container vulnerabilities blocking CI conditions under the documented thresholds;
+- retained the synthetic-only, non-clinical, non-PHI project boundary and documented that automated scans do not prove security.
+
 ## 0.18.0
 
 - added PostgreSQL-backed compatibility jobs for CPython 3.12, 3.13, and 3.14;
