@@ -1,4 +1,4 @@
-"""Generic validation pipeline for every registered clinical dataset."""
+"""Generic validation pipeline governed by versioned executable contracts."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from clinical_data_platform.contract import validate_records_against_contract
 from clinical_data_platform.ingestion import read_csv_records
 from clinical_data_platform.models import DatasetPipelineSummary, ValidationError
 from clinical_data_platform.registry import get_dataset_definition
@@ -59,13 +60,18 @@ def run_dataset_validation(
     *,
     reference_date: date | None = None,
 ) -> DatasetPipelineSummary:
-    """Validate one registered dataset and write consistent audit outputs."""
+    """Validate one dataset using the active contract selected by the manifest."""
     definition = get_dataset_definition(dataset)
+    contract = definition.contract
     effective_reference_date = reference_date or date.today()
     run_id = uuid4()
     source_sha256 = _sha256(input_path)
     records = read_csv_records(input_path)
-    result = definition.validator(records, effective_reference_date)
+    result = validate_records_against_contract(
+        records,
+        contract,
+        reference_date=effective_reference_date,
+    )
 
     output_directory.mkdir(parents=True, exist_ok=True)
     valid_records_path = output_directory / f"valid_{dataset}.csv"
@@ -73,8 +79,8 @@ def run_dataset_validation(
     validation_errors_path = output_directory / "validation_errors.csv"
     quality_report_path = output_directory / "quality_report.json"
 
-    _write_records(valid_records_path, definition.columns, result.valid_records)
-    _write_records(invalid_records_path, definition.columns, result.invalid_records)
+    _write_records(valid_records_path, contract.column_names, result.valid_records)
+    _write_records(invalid_records_path, contract.column_names, result.invalid_records)
     _write_errors(validation_errors_path, result.errors)
 
     rule_counts = Counter(error.rule for error in result.errors)
@@ -84,6 +90,9 @@ def run_dataset_validation(
         "generated_at": datetime.now(UTC).isoformat(),
         "input_path": str(input_path),
         "input_sha256": source_sha256,
+        "contract_path": contract.resource_path,
+        "contract_version": contract.version,
+        "contract_sha256": contract.sha256,
         "reference_date": effective_reference_date.isoformat(),
         "rows_received": result.rows_received,
         "rows_valid": len(result.valid_records),
@@ -99,6 +108,8 @@ def run_dataset_validation(
     return DatasetPipelineSummary(
         run_id=run_id,
         dataset=dataset,
+        contract_version=contract.version,
+        contract_sha256=contract.sha256,
         source_sha256=source_sha256,
         rows_received=result.rows_received,
         rows_valid=len(result.valid_records),
