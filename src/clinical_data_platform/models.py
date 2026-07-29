@@ -1,4 +1,4 @@
-"""Shared data structures for dataset validation and pipeline execution."""
+"""Shared data structures for contract validation and pipeline execution."""
 
 from __future__ import annotations
 
@@ -38,10 +38,12 @@ class ValidationResult:
 
 @dataclass(frozen=True, slots=True)
 class DatasetPipelineSummary:
-    """Summary and output locations for one generic dataset-validation run."""
+    """Summary and output locations for one contract-governed validation run."""
 
     run_id: UUID
     dataset: str
+    contract_version: str
+    contract_sha256: str
     source_sha256: str
     rows_received: int
     rows_valid: int

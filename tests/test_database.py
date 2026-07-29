@@ -35,7 +35,7 @@ def test_missing_database_url_is_reported(monkeypatch: pytest.MonkeyPatch) -> No
 
 @pytest.mark.integration
 @pytest.mark.skipif(DATABASE_URL is None, reason="DATABASE_URL is not configured")
-def test_registered_dataset_is_persisted_transactionally(tmp_path: Path) -> None:
+def test_registered_dataset_is_persisted_with_contract_lineage(tmp_path: Path) -> None:
     assert DATABASE_URL is not None
     validation_summary = run_dataset_validation(
         "patients",
@@ -54,12 +54,17 @@ def test_registered_dataset_is_persisted_transactionally(tmp_path: Path) -> None
 
         assert persistence_summary.run_id == validation_summary.run_id
         assert persistence_summary.dataset == "patients"
+        assert persistence_summary.contract_version == "1.0.0"
         assert persistence_summary.already_loaded is False
         assert persistence_summary.records_upserted == 5
         assert persistence_summary.validation_errors_inserted == 3
 
-        run_count = connection.execute(
-            "SELECT COUNT(*) FROM audit.pipeline_runs WHERE run_id = %s",
+        run_row = connection.execute(
+            """
+            SELECT contract_version, contract_sha256, contract_path
+            FROM audit.pipeline_runs
+            WHERE run_id = %s
+            """,
             (validation_summary.run_id,),
         ).fetchone()
         patient_count = connection.execute(
@@ -71,7 +76,10 @@ def test_registered_dataset_is_persisted_transactionally(tmp_path: Path) -> None
             (validation_summary.run_id,),
         ).fetchone()
 
-        assert run_count is not None and run_count[0] == 1
+        assert run_row is not None
+        assert run_row[0] == "1.0.0"
+        assert run_row[1] == validation_summary.contract_sha256
+        assert str(run_row[2]).endswith("v1.0.0.toml")
         assert patient_count is not None and patient_count[0] == 5
         assert error_count is not None and error_count[0] == 3
 

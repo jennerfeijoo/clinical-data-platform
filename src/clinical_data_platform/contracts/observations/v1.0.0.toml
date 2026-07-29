@@ -1,0 +1,78 @@
+[dataset]
+name = "observations"
+version = "1.0.0"
+primary_key = "observation_id"
+patient_id_column = "patient_id"
+allow_extra_columns = false
+
+[measurement]
+code_field = "observation_code"
+value_field = "value_numeric"
+unit_field = "unit"
+
+[[measurement.profiles]]
+code = "SYSTOLIC_BP"
+unit = "mmHg"
+minimum = 50.0
+maximum = 300.0
+
+[[measurement.profiles]]
+code = "DIASTOLIC_BP"
+unit = "mmHg"
+minimum = 30.0
+maximum = 200.0
+
+[[measurement.profiles]]
+code = "HEART_RATE"
+unit = "bpm"
+minimum = 20.0
+maximum = 250.0
+
+[[columns]]
+name = "observation_id"
+type = "string"
+required = true
+unique = true
+
+[[columns]]
+name = "patient_id"
+type = "string"
+required = true
+unique = false
+
+[[columns]]
+name = "encounter_id"
+type = "string"
+required = true
+unique = false
+
+[[columns]]
+name = "observation_code"
+type = "string"
+required = true
+unique = false
+allowed_values = ["SYSTOLIC_BP", "DIASTOLIC_BP", "HEART_RATE"]
+
+[[columns]]
+name = "value_numeric"
+type = "number"
+required = true
+unique = false
+
+[[columns]]
+name = "unit"
+type = "string"
+required = true
+unique = false
+
+[[columns]]
+name = "observed_at"
+type = "datetime"
+required = true
+unique = false
+
+[[columns]]
+name = "source_system"
+type = "string"
+required = true
+unique = false

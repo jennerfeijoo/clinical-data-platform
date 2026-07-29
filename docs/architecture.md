@@ -6,25 +6,32 @@ The repository is progressing toward a portfolio-grade clinical data platform. I
 
 ## Architectural objective
 
-The validation and persistence workflow must not contain a special path for patients. Every supported dataset is executed through the same pipeline and persistence functions.
+Dataset interfaces must be explicit, executable, versioned, and auditable. The generic pipeline must not contain patient-specific or observation-specific validation branches.
 
 ```text
 Dataset name
     │
     ▼
-Dataset registry
+Active contract manifest
     │
-    ├── columns
-    ├── identifier
-    ├── validator
-    ├── row builder
-    └── upsert SQL
+    ▼
+Versioned TOML contract
+    │
+    ├── schema and field order
+    ├── primary key and uniqueness
+    ├── required values
+    ├── types and categories
+    ├── temporal rules
+    └── measurement profiles
+    │
+    ▼
+Generic contract engine
     │
     ▼
 Generic validation pipeline
     │
     ▼
-Generic persistence workflow
+Registry-controlled persistence
 ```
 
 ## Data flow
@@ -36,18 +43,31 @@ Synthetic CSV source
 Dataset registry lookup
         │
         ▼
+Contract manifest lookup
+        │
+        ▼
+Load and validate active TOML contract
+        │
+        ├── contract version
+        ├── contract path
+        └── contract SHA-256
+        │
+        ▼
 UTF-8 ingestion
         │
         ▼
-Registered dataset validator
+Execute contract rules
         │
         ├── valid rows
         ├── invalid rows
         ├── normalized errors
-        └── quality report + SHA-256 + run UUID
+        └── quality report
         │
         ▼
-Generic transactional PostgreSQL loading
+Verify contract lineage again
+        │
+        ▼
+Transactional PostgreSQL loading
         │
         ├── registered row builder
         ├── registered upsert SQL
@@ -59,12 +79,55 @@ Versioned cohort SQL
         │
         ▼
 analytics.hypertension_features
-        │
-        ├── CSV feature export
-        └── cohort metadata JSON
+```
+
+## Contract resource model
+
+Contracts are packaged application resources:
+
+```text
+src/clinical_data_platform/contracts/
+├── manifest.toml
+├── patients/v1.0.0.toml
+├── encounters/v1.0.0.toml
+├── diagnoses/v1.0.0.toml
+└── observations/v1.0.0.toml
+```
+
+`manifest.toml` maps a dataset name to its active contract resource. A historical contract file is retained after a newer version becomes active.
+
+A contract defines:
+
+```text
+name
+semantic version
+primary key
+patient identifier column
+extra-column policy
+ordered columns
+column types
+required and unique flags
+allowed values
+temporal ordering rules
+not-in-future rules
+conditional measurement profiles
 ```
 
 ## Core modules
+
+### `contract.py`
+
+Defines the contract engine:
+
+- parses TOML with Python `tomllib`;
+- validates the contract definition itself;
+- enforces semantic version syntax;
+- checks that primary keys and rule references are internally consistent;
+- computes SHA-256 over the exact contract bytes;
+- executes contract rules against source records;
+- returns normalized `ValidationResult` objects.
+
+The contract engine does not connect to PostgreSQL and does not contain dataset-specific SQL.
 
 ### `models.py`
 
@@ -78,25 +141,14 @@ The pipeline consumes these structures and does not depend on dataset-specific e
 
 ### `registry.py`
 
-Defines `DatasetDefinition`, the variation point of the architecture. A definition contains:
+Defines runtime behavior that remains inappropriate for free-form configuration:
 
-- dataset name;
-- ordered CSV columns;
-- primary identifier column;
-- validation callable;
-- row-conversion callable;
-- PostgreSQL upsert statement.
+- row conversion to PostgreSQL values;
+- upsert SQL.
 
-`DATASET_REGISTRY` currently registers:
+`DatasetDefinition` obtains columns and primary keys from the active contract instead of duplicating them in Python.
 
-```text
-patients
-encounters
-diagnoses
-observations
-```
-
-Adding a dataset should require a new definition and its domain-specific implementation, not changes to the generic pipeline.
+The registry and contract manifest must contain the same datasets in the same deterministic order. A mismatch fails early.
 
 ### `pipeline.py`
 
@@ -106,9 +158,18 @@ Implements the invariant validation workflow through:
 run_dataset_validation(...)
 ```
 
-It performs registry lookup, ingestion, validation dispatch, quality-output generation, checksumming, and run-summary construction.
+It performs:
 
-It contains no patient-specific branch.
+1. registry lookup;
+2. active contract loading;
+3. source checksum calculation;
+4. CSV ingestion;
+5. contract execution;
+6. output generation;
+7. quality-report generation;
+8. run-summary construction.
+
+The quality report records both source and contract lineage.
 
 ### `database.py`
 
@@ -118,94 +179,127 @@ Implements the invariant persistence workflow through:
 persist_dataset_validation_outputs(...)
 ```
 
-It validates output consistency, records the pipeline run, invokes the registered row builder and upsert SQL, persists normalized errors, and commits atomically.
+Before persistence it:
 
-It contains no patient-specific persistence function.
+1. validates generated output counts;
+2. loads the historical contract referenced by `contract_path`;
+3. verifies dataset identity;
+4. verifies `contract_version`;
+5. recalculates and compares `contract_sha256`;
+6. inserts pipeline metadata;
+7. converts validated rows using the registered row builder;
+8. performs the registered upsert;
+9. stores normalized errors;
+10. commits atomically.
 
-### Domain validators
+This allows a run generated under an older retained contract to preserve its exact lineage even after the manifest activates a newer version.
 
-Dataset-specific clinical rules remain separate:
+## Validation layers
 
-- `validation.py`: patient rules;
-- `clinical_entities.py`: encounter, diagnosis, and observation rules.
+### Contract validation
 
-The registry adapts their outputs to the normalized validation model. This preserves domain rules while replacing duplicated orchestration.
+Executed before database access:
 
-## Layers
+```text
+required_column
+unexpected_column
+required_value
+unique
+allowed_values
+iso_date
+iso_datetime
+numeric
+not_in_future
+temporal_consistency
+unit_consistency
+plausible_range
+```
 
-### Source layer
+### Relational validation
 
-Small version-controlled CSV files provide deterministic test fixtures. Intentional invalid records exercise validation and quarantine behavior.
+Executed by PostgreSQL:
 
-### Validation layer
-
-Validation is split into intrinsic and relational controls:
-
-- Python validates schema presence, required values, uniqueness within a file, categories, formats, units, plausible ranges, and temporal relationships.
-- PostgreSQL validates foreign keys and normalized relational constraints.
+- foreign keys;
+- database check constraints;
+- primary keys;
+- transactional consistency.
 
 Rejected rows are preserved rather than silently dropped.
 
-### Persistence layer
+## Versioning model
 
-The `clinical` schema stores normalized entities. The `audit` schema stores pipeline execution metadata, validation failures, cohort runs, and cohort-to-source-run mappings.
+Contract versions follow semantic versioning:
 
-Loads are transactional. A run UUID is inserted once, so retrying the same output directory is idempotent.
+```text
+MAJOR.MINOR.PATCH
+```
 
-### Analytics layer
+Policy:
 
-Cohort logic is implemented in version-controlled SQL. The current hypertension definition writes a materialized feature snapshot keyed by `cohort_run_id` and `patient_id`.
+- PATCH: non-behavioral correction;
+- MINOR: backward-compatible interface addition;
+- MAJOR: incompatible interface change.
 
-### Interface layer
+Published contract resources are not overwritten. A new version is introduced as a new file and activated by updating the manifest.
+
+## Reproducibility model
+
+A validation run is identified by:
+
+```text
+run UUID
+source path
+source SHA-256
+contract resource path
+contract semantic version
+contract SHA-256
+reference date
+generation timestamp
+```
+
+The version communicates intended compatibility. The hash identifies the exact bytes executed.
+
+## Interface layer
 
 The package exposes:
 
-- a Python API;
-- the `clinical-data` command-line interface;
+- Python APIs;
+- the `clinical-data` CLI;
 - Docker Compose services;
 - PowerShell and POSIX demo scripts.
 
-The generic CLI commands are:
+Contract-oriented CLI commands:
+
+```text
+clinical-data list-contracts
+clinical-data show-contract
+clinical-data validate-contracts
+```
+
+Pipeline commands:
 
 ```text
 clinical-data validate-dataset
 clinical-data load-dataset
 ```
 
-## Reproducibility controls
-
-- immutable run UUIDs;
-- source SHA-256 checksums;
-- consistent output naming across datasets;
-- explicit cohort definition version;
-- parameterized cohort generation;
-- deterministic baseline-measurement tie-breaking;
-- persistent source-run mappings;
-- automated linting, static typing, unit tests, and PostgreSQL integration tests.
-
 ## Design trade-offs
 
-### Executable registry
+### TOML instead of YAML
 
-The registry is Python code rather than a declarative contract. This makes callables and SQL easy to associate with a dataset, but it also couples registration to implementation details.
+Python 3.11 includes `tomllib`, so contracts can be parsed without another runtime dependency. TOML remains readable and supports nested tables and arrays of tables.
 
-A later step may separate:
+### Contracts inside the package
 
-```text
-schema contract
-validation rules
-persistence adapter
-```
+This guarantees that contracts are available in editable installs, wheels, and Docker images. The cost is that publishing a new active contract requires a new package build.
 
-### Validation adapters
+### SQL remains in Python
 
-Patient and non-patient validators originally returned different error types. Registry adapters normalize these results without rewriting every clinical rule during the architectural refactor.
+Contracts describe accepted data and validation rules. SQL remains controlled code because arbitrary SQL in configuration would expand the execution and security surface.
 
-This reduces migration risk, but the adapters remain a temporary layer that can be simplified later.
+### Purpose-built rule language
 
-### SQL in definitions
-
-Keeping upsert SQL in `DatasetDefinition` centralizes dataset behavior. The cost is that registry definitions know about persistence. A larger system would likely register separate validation and persistence adapters.
+The engine supports the rules required by the current clinical datasets. It is not intended to replace general systems such as JSON Schema, Pydantic, Pandera, or enterprise data-contract platforms.
 
 ## Extension rule
 
@@ -216,16 +310,26 @@ pipeline.py
 database.py
 ```
 
-The extension should be limited to:
+The extension is limited to:
 
-- domain rules;
-- dataset definition;
-- database table or migration;
+- a versioned contract;
+- a manifest entry;
+- a registry persistence adapter;
+- a database table or migration;
 - tests;
 - documentation.
 
 ## Current limitations
 
-The platform does not yet implement declarative versioned contracts, schema migrations, immutable raw storage, large-scale loading, external terminology services, production observability, authentication, or PHI handling.
+The platform does not yet implement:
 
-The architectural refactor is the first step toward version `1.0.0`, not a claim of final production readiness.
+- database schema migrations;
+- immutable raw storage;
+- historical clinical-record versioning;
+- large-scale loading and benchmarks;
+- external terminology services;
+- production observability;
+- authentication;
+- PHI handling.
+
+Executable contracts improve reproducibility and maintainability but do not imply production clinical readiness.

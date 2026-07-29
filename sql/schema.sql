@@ -7,6 +7,9 @@ CREATE TABLE IF NOT EXISTS audit.pipeline_runs (
     dataset_name TEXT NOT NULL,
     source_path TEXT NOT NULL,
     source_sha256 CHAR(64) NOT NULL,
+    contract_path TEXT NOT NULL,
+    contract_version TEXT NOT NULL,
+    contract_sha256 CHAR(64) NOT NULL,
     reference_date DATE NOT NULL,
     rows_received INTEGER NOT NULL CHECK (rows_received >= 0),
     rows_valid INTEGER NOT NULL CHECK (rows_valid >= 0),
@@ -16,6 +19,29 @@ CREATE TABLE IF NOT EXISTS audit.pipeline_runs (
     generated_at TIMESTAMPTZ NOT NULL,
     loaded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE audit.pipeline_runs
+    ADD COLUMN IF NOT EXISTS contract_path TEXT;
+ALTER TABLE audit.pipeline_runs
+    ADD COLUMN IF NOT EXISTS contract_version TEXT;
+ALTER TABLE audit.pipeline_runs
+    ADD COLUMN IF NOT EXISTS contract_sha256 CHAR(64);
+
+UPDATE audit.pipeline_runs
+SET contract_path = COALESCE(contract_path, 'legacy/unversioned'),
+    contract_version = COALESCE(contract_version, '0.0.0'),
+    contract_sha256 = COALESCE(
+        contract_sha256,
+        '0000000000000000000000000000000000000000000000000000000000000000'
+    )
+WHERE contract_path IS NULL
+   OR contract_version IS NULL
+   OR contract_sha256 IS NULL;
+
+ALTER TABLE audit.pipeline_runs
+    ALTER COLUMN contract_path SET NOT NULL,
+    ALTER COLUMN contract_version SET NOT NULL,
+    ALTER COLUMN contract_sha256 SET NOT NULL;
 
 CREATE TABLE IF NOT EXISTS clinical.patients (
     patient_id TEXT PRIMARY KEY,
@@ -126,6 +152,8 @@ CREATE TABLE IF NOT EXISTS analytics.hypertension_features (
 
 CREATE INDEX IF NOT EXISTS idx_validation_errors_run_id
     ON audit.validation_errors (run_id);
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_dataset_contract
+    ON audit.pipeline_runs (dataset_name, contract_version);
 CREATE INDEX IF NOT EXISTS idx_patients_source_run_id
     ON clinical.patients (source_run_id);
 CREATE INDEX IF NOT EXISTS idx_encounters_patient_start

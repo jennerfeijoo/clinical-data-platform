@@ -1,4 +1,4 @@
-"""Generic PostgreSQL persistence for validated clinical datasets."""
+"""Generic PostgreSQL persistence for contract-governed clinical datasets."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from uuid import UUID
 
 import psycopg
 
+from clinical_data_platform.contract import load_contract_by_resource
 from clinical_data_platform.ingestion import read_csv_records
 from clinical_data_platform.registry import get_dataset_definition
 
@@ -32,6 +33,9 @@ class QualityReport(TypedDict):
     generated_at: str
     input_path: str
     input_sha256: str
+    contract_path: str
+    contract_version: str
+    contract_sha256: str
     reference_date: str
     rows_received: int
     rows_valid: int
@@ -46,6 +50,7 @@ class DatasetPersistenceSummary:
 
     run_id: UUID
     dataset: str
+    contract_version: str
     already_loaded: bool
     records_upserted: int
     validation_errors_inserted: int
@@ -93,6 +98,9 @@ def _read_quality_report(path: Path) -> QualityReport:
         "generated_at",
         "input_path",
         "input_sha256",
+        "contract_path",
+        "contract_version",
+        "contract_sha256",
         "reference_date",
         "status",
     )
@@ -120,6 +128,9 @@ def _read_quality_report(path: Path) -> QualityReport:
         generated_at=raw["generated_at"],
         input_path=raw["input_path"],
         input_sha256=raw["input_sha256"],
+        contract_path=raw["contract_path"],
+        contract_version=raw["contract_version"],
+        contract_sha256=raw["contract_sha256"],
         reference_date=raw["reference_date"],
         rows_received=raw["rows_received"],
         rows_valid=raw["rows_valid"],
@@ -145,12 +156,24 @@ def _validate_output_counts(
         raise PersistenceError("validation_errors does not match validation_errors.csv.")
 
 
+def _validate_contract_lineage(report: QualityReport, dataset: str) -> None:
+    contract = load_contract_by_resource(report["contract_path"])
+    if contract.name != dataset:
+        raise PersistenceError(
+            f"Contract contains dataset {contract.name!r}, expected {dataset!r}."
+        )
+    if report["contract_version"] != contract.version:
+        raise PersistenceError("contract_version does not match the referenced contract.")
+    if report["contract_sha256"] != contract.sha256:
+        raise PersistenceError("contract_sha256 does not match the referenced contract bytes.")
+
+
 def persist_dataset_validation_outputs(
     connection: psycopg.Connection[Any],
     dataset: str,
     output_directory: Path,
 ) -> DatasetPersistenceSummary:
-    """Load one registered dataset and its audit metadata transactionally."""
+    """Load one registered dataset and its complete contract lineage transactionally."""
     definition = get_dataset_definition(dataset)
     report = _read_quality_report(output_directory / "quality_report.json")
     valid_records = read_csv_records(output_directory / f"valid_{dataset}.csv")
@@ -166,6 +189,9 @@ def persist_dataset_validation_outputs(
         raise PersistenceError("Only completed validation runs can be persisted.")
     if len(report["input_sha256"]) != 64:
         raise PersistenceError("input_sha256 must contain 64 hexadecimal characters.")
+    if len(report["contract_sha256"]) != 64:
+        raise PersistenceError("contract_sha256 must contain 64 hexadecimal characters.")
+    _validate_contract_lineage(report, dataset)
 
     try:
         run_id = UUID(report["run_id"])
@@ -198,10 +224,14 @@ def persist_dataset_validation_outputs(
             """
             INSERT INTO audit.pipeline_runs (
                 run_id, dataset_name, source_path, source_sha256,
+                contract_path, contract_version, contract_sha256,
                 reference_date, rows_received, rows_valid, rows_invalid,
                 validation_errors, status, generated_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s
+            )
             ON CONFLICT (run_id) DO NOTHING
             """,
             (
@@ -209,6 +239,9 @@ def persist_dataset_validation_outputs(
                 dataset,
                 report["input_path"],
                 report["input_sha256"],
+                report["contract_path"],
+                report["contract_version"],
+                report["contract_sha256"],
                 reference_date,
                 report["rows_received"],
                 report["rows_valid"],
@@ -220,7 +253,14 @@ def persist_dataset_validation_outputs(
         )
 
         if inserted_run.rowcount == 0:
-            return DatasetPersistenceSummary(run_id, dataset, True, 0, 0)
+            return DatasetPersistenceSummary(
+                run_id=run_id,
+                dataset=dataset,
+                contract_version=report["contract_version"],
+                already_loaded=True,
+                records_upserted=0,
+                validation_errors_inserted=0,
+            )
 
         if record_values:
             with connection.cursor() as cursor:
@@ -242,6 +282,7 @@ def persist_dataset_validation_outputs(
     return DatasetPersistenceSummary(
         run_id=run_id,
         dataset=dataset,
+        contract_version=report["contract_version"],
         already_loaded=False,
         records_upserted=len(record_values),
         validation_errors_inserted=len(error_values),

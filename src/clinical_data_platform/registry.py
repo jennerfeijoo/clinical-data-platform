@@ -1,25 +1,20 @@
-"""Registry of supported clinical datasets and their executable behavior."""
+"""Registry of persistence behavior for contract-defined clinical datasets."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from uuid import UUID
 
-from clinical_data_platform.clinical_entities import (
-    DIAGNOSIS_COLUMNS,
-    ENCOUNTER_COLUMNS,
-    OBSERVATION_COLUMNS,
-    EntityValidationResult,
-    validate_diagnosis_records,
-    validate_encounter_records,
-    validate_observation_records,
+from clinical_data_platform.contract import (
+    ContractDefinitionError,
+    DatasetContract,
+    contract_names,
+    load_contract,
 )
-from clinical_data_platform.models import ClinicalRecord, ValidationError, ValidationResult
-from clinical_data_platform.validation import PATIENT_COLUMNS, validate_patient_records
+from clinical_data_platform.models import ClinicalRecord
 
-Validator = Callable[[Sequence[Mapping[str, str]], date], ValidationResult]
 RowBuilder = Callable[
     [list[ClinicalRecord], UUID, str],
     list[tuple[object, ...]],
@@ -28,74 +23,26 @@ RowBuilder = Callable[
 
 @dataclass(frozen=True, slots=True)
 class DatasetDefinition:
-    """Executable definition of one supported clinical dataset."""
+    """Runtime behavior that cannot be represented safely in a data contract."""
 
     name: str
-    columns: tuple[str, ...]
-    id_column: str
-    validator: Validator
     row_builder: RowBuilder
     upsert_sql: str
 
+    @property
+    def contract(self) -> DatasetContract:
+        """Return the active executable contract for this dataset."""
+        return load_contract(self.name)
 
-def _validate_patients(
-    records: Sequence[Mapping[str, str]],
-    reference_date: date,
-) -> ValidationResult:
-    result = validate_patient_records(records, reference_date=reference_date)
-    errors = tuple(
-        ValidationError(
-            row_number=error.row_number,
-            entity_id=error.patient_id,
-            patient_id=error.patient_id,
-            field=error.field,
-            rule=error.rule,
-            message=error.message,
-            value=error.value,
-        )
-        for error in result.errors
-    )
-    return ValidationResult(result.valid_records, result.invalid_records, errors)
+    @property
+    def columns(self) -> tuple[str, ...]:
+        """Expose contract columns for output generation and inspection."""
+        return self.contract.column_names
 
-
-def _normalize_entity_result(result: EntityValidationResult) -> ValidationResult:
-    errors = tuple(
-        ValidationError(
-            row_number=error.row_number,
-            entity_id=error.entity_id,
-            patient_id=error.patient_id,
-            field=error.field,
-            rule=error.rule,
-            message=error.message,
-            value=error.value,
-        )
-        for error in result.errors
-    )
-    return ValidationResult(result.valid_records, result.invalid_records, errors)
-
-
-def _validate_encounters(
-    records: Sequence[Mapping[str, str]],
-    reference_date: date,
-) -> ValidationResult:
-    del reference_date
-    return _normalize_entity_result(validate_encounter_records(records))
-
-
-def _validate_diagnoses(
-    records: Sequence[Mapping[str, str]],
-    reference_date: date,
-) -> ValidationResult:
-    del reference_date
-    return _normalize_entity_result(validate_diagnosis_records(records))
-
-
-def _validate_observations(
-    records: Sequence[Mapping[str, str]],
-    reference_date: date,
-) -> ValidationResult:
-    del reference_date
-    return _normalize_entity_result(validate_observation_records(records))
+    @property
+    def id_column(self) -> str:
+        """Expose the primary key declared by the active contract."""
+        return self.contract.primary_key
 
 
 def _patient_rows(
@@ -259,33 +206,21 @@ OBSERVATION_UPSERT_SQL = """
 DATASET_REGISTRY: dict[str, DatasetDefinition] = {
     "patients": DatasetDefinition(
         name="patients",
-        columns=PATIENT_COLUMNS,
-        id_column="patient_id",
-        validator=_validate_patients,
         row_builder=_patient_rows,
         upsert_sql=PATIENT_UPSERT_SQL,
     ),
     "encounters": DatasetDefinition(
         name="encounters",
-        columns=ENCOUNTER_COLUMNS,
-        id_column="encounter_id",
-        validator=_validate_encounters,
         row_builder=_encounter_rows,
         upsert_sql=ENCOUNTER_UPSERT_SQL,
     ),
     "diagnoses": DatasetDefinition(
         name="diagnoses",
-        columns=DIAGNOSIS_COLUMNS,
-        id_column="diagnosis_id",
-        validator=_validate_diagnoses,
         row_builder=_diagnosis_rows,
         upsert_sql=DIAGNOSIS_UPSERT_SQL,
     ),
     "observations": DatasetDefinition(
         name="observations",
-        columns=OBSERVATION_COLUMNS,
-        id_column="observation_id",
-        validator=_validate_observations,
         row_builder=_observation_rows,
         upsert_sql=OBSERVATION_UPSERT_SQL,
     ),
@@ -293,16 +228,27 @@ DATASET_REGISTRY: dict[str, DatasetDefinition] = {
 
 
 def dataset_names() -> tuple[str, ...]:
-    """Return supported dataset names in deterministic order."""
-    return tuple(DATASET_REGISTRY)
+    """Return datasets only when runtime behavior and contract manifest agree."""
+    registry_names = tuple(DATASET_REGISTRY)
+    manifest_names = contract_names()
+    if registry_names != manifest_names:
+        raise ContractDefinitionError(
+            "Dataset registry order and contract manifest entries must match exactly."
+        )
+    return registry_names
 
 
 def get_dataset_definition(dataset: str) -> DatasetDefinition:
     """Return one registered dataset or raise a descriptive error."""
     try:
-        return DATASET_REGISTRY[dataset]
+        definition = DATASET_REGISTRY[dataset]
     except KeyError as exc:
         supported = ", ".join(dataset_names())
         raise ValueError(
             f"Unsupported dataset {dataset!r}; expected one of: {supported}"
         ) from exc
+    if definition.contract.name != definition.name:
+        raise ContractDefinitionError(
+            f"Runtime definition {definition.name!r} does not match its contract."
+        )
+    return definition

@@ -1,18 +1,23 @@
 from datetime import date
 from pathlib import Path
 
+from clinical_data_platform.contract import load_contract, validate_records_against_contract
 from clinical_data_platform.ingestion import read_csv_records
-from clinical_data_platform.validation import validate_patient_records
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_DATASET = REPOSITORY_ROOT / "data" / "sample" / "patients.csv"
 
 
-def test_validation_separates_valid_and_invalid_records() -> None:
-    result = validate_patient_records(
-        read_csv_records(SAMPLE_DATASET),
+def _validate_patients(records: list[dict[str, str]]):
+    return validate_records_against_contract(
+        records,
+        load_contract("patients"),
         reference_date=date(2026, 7, 29),
     )
+
+
+def test_validation_separates_valid_and_invalid_records() -> None:
+    result = _validate_patients(read_csv_records(SAMPLE_DATASET))
 
     assert result.rows_received == 8
     assert len(result.valid_records) == 5
@@ -21,10 +26,7 @@ def test_validation_separates_valid_and_invalid_records() -> None:
 
 
 def test_validation_reports_expected_rules() -> None:
-    result = validate_patient_records(
-        read_csv_records(SAMPLE_DATASET),
-        reference_date=date(2026, 7, 29),
-    )
+    result = _validate_patients(read_csv_records(SAMPLE_DATASET))
 
     errors_by_patient = {error.patient_id: error.rule for error in result.errors}
 
@@ -53,7 +55,7 @@ def test_duplicate_patient_identifier_is_rejected() -> None:
         },
     ]
 
-    result = validate_patient_records(records, reference_date=date(2026, 7, 29))
+    result = _validate_patients(records)
 
     assert len(result.valid_records) == 1
     assert len(result.invalid_records) == 1
@@ -71,7 +73,7 @@ def test_missing_required_value_is_reported() -> None:
         }
     ]
 
-    result = validate_patient_records(records, reference_date=date(2026, 7, 29))
+    result = _validate_patients(records)
 
     assert len(result.invalid_records) == 1
     assert result.errors[0].field == "birth_date"
