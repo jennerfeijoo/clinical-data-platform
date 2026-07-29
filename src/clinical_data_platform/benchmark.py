@@ -24,10 +24,10 @@ import psycopg
 from psycopg import sql
 
 import clinical_data_platform
-from clinical_data_platform.bulk import CopyMergePlan, copy_merge_rows
 from clinical_data_platform.benchmark_safety import (
     assert_isolated_empty_benchmark_database,
 )
+from clinical_data_platform.bulk import CopyMergePlan, copy_merge_rows
 from clinical_data_platform.models import ClinicalRecord
 from clinical_data_platform.registry import dataset_names, get_dataset_definition
 
