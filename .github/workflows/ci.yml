@@ -56,6 +56,14 @@ jobs:
           clinical-data database-migrate
           clinical-data database-validate
 
+      - name: Exercise immutable raw CLI
+        run: |
+          RAW_ROOT="$RUNNER_TEMP/raw"
+          clinical-data raw-capture patients data/sample/patients.csv --raw-root "$RAW_ROOT"
+          MANIFEST=$(find "$RAW_ROOT/receipts/patients" -type f -name '*.json' -print -quit)
+          RELATIVE_MANIFEST=${MANIFEST#"$RAW_ROOT"/}
+          clinical-data raw-verify "$RELATIVE_MANIFEST" --raw-root "$RAW_ROOT"
+
       - name: Lint
         run: python -m ruff check .
 
@@ -75,3 +83,12 @@ jobs:
         run: >-
           docker run --rm --entrypoint python clinical-data-platform:ci
           -c "from clinical_data_platform.migration import discover_migrations; print(len(discover_migrations()))"
+
+      - name: Smoke-test container raw capture
+        run: |
+          mkdir -p "$RUNNER_TEMP/container-raw"
+          docker run --rm \
+            --volume "$RUNNER_TEMP/container-raw:/tmp/raw" \
+            --entrypoint python \
+            clinical-data-platform:ci \
+            -c "from pathlib import Path; from clinical_data_platform.raw import capture_raw_source, verify_raw_receipt; receipt = capture_raw_source('patients', Path('/app/data/sample/patients.csv'), Path('/tmp/raw')); verify_raw_receipt(Path('/tmp/raw'), receipt.manifest_relative_path); print(receipt.sha256)"
