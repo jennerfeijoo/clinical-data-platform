@@ -10,7 +10,7 @@ docker compose up -d postgres
 clinical-data-benchmark \
   --allow-destructive-reset \
   --patients 250 1000 2500 \
-  --repetitions 5 \
+  --repetitions 6 \
   --warmups 1 \
   --seed 20260729 \
   --output-dir data/benchmarks/loading
