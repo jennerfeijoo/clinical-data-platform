@@ -11,6 +11,23 @@ permissions:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://clinical_user:clinical_password@localhost:5432/clinical_data
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: clinical_data
+          POSTGRES_USER: clinical_user
+          POSTGRES_PASSWORD: clinical_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U clinical_user -d clinical_data"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - name: Check out repository
