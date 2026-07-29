@@ -7,7 +7,7 @@ import json
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
-from datetime import UTC, date, datetime
+from datetime import date
 from pathlib import Path
 from uuid import uuid4
 
