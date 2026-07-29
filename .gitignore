@@ -11,5 +11,6 @@ htmlcov/
 build/
 dist/
 .env
+data/processed/
 .DS_Store
 Thumbs.db
