@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.17.0
+
+- raised statement coverage from 82% to more than 90% without excluding package modules;
+- made the 90% minimum mandatory through shared pytest-cov and coverage configuration;
+- added behavioral tests for the primary, cohort, benchmark, demo, and logging entrypoints;
+- exercised real contracts, raw capture, validation, Synthea adaptation, cohort comparison, and quality reporting with synthetic fixtures;
+- added governed failure-path tests for Synthea profiles, source artifacts, external commands, Git checkout state, and Java versions;
+- retained PostgreSQL and Java boundaries as controlled doubles where unit tests must remain deterministic;
+- documented the coverage policy, interpretation limits, and maintenance workflow;
+- retained the synthetic-only, non-clinical, non-PHI project boundary.
+
 ## 0.16.0
 
 - added reproducible source-to-adapted attrition reports for both Synthea cohorts;
