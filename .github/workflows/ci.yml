@@ -47,6 +47,15 @@ jobs:
       - name: Validate packaged contracts
         run: clinical-data validate-contracts
 
+      - name: Validate packaged migrations
+        run: |
+          python -c "from clinical_data_platform.migration import discover_migrations; print([m.resource_path for m in discover_migrations()])"
+
+      - name: Exercise migration CLI
+        run: |
+          clinical-data database-migrate
+          clinical-data database-validate
+
       - name: Lint
         run: python -m ruff check .
 
@@ -61,3 +70,8 @@ jobs:
 
       - name: Smoke-test container contracts
         run: docker run --rm clinical-data-platform:ci validate-contracts
+
+      - name: Smoke-test packaged container migrations
+        run: >-
+          docker run --rm --entrypoint python clinical-data-platform:ci
+          -c "from clinical_data_platform.migration import discover_migrations; print(len(discover_migrations()))"
