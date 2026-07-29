@@ -4,9 +4,12 @@ from typing import Any
 import psycopg
 import pytest
 
-from clinical_data_platform.bulk import CopyMergePlan, copy_merge_rows, copy_rows
+from clinical_data_platform.bulk import (
+    CopyMergePlan,
+    copy_merge_rows,
+    copy_rows,
+)
 from clinical_data_platform.ingestion import inspect_csv_records, iter_csv_records
-
 
 
 def test_copy_merge_plan_rejects_unsafe_column_relationships() -> None:
