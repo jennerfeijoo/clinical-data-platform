@@ -11,7 +11,6 @@ from typing import Final, Mapping
 from uuid import UUID
 
 EXECUTION_JOURNAL_VERSION: Final = "1.0.0"
-EXECUTION_JOURNAL_FILENAME: Final = "execution_journal.jsonl"
 MAX_ERROR_MESSAGE_LENGTH: Final = 2_000
 
 EXECUTION_STATUSES: Final = (
@@ -79,69 +78,63 @@ class ExecutionJournalSummary:
     events: tuple[ExecutionEvent, ...]
 
 
-class _RecordedFailure(RuntimeError):
-    """Internal wrapper used only to reproduce stored failed-event hashes."""
-
-    def __init__(self, message: str, error_type: str | None, error_code: str | None) -> None:
-        super().__init__(message)
-        self.recorded_error_type = error_type
-        self.sqlstate = error_code
-
-
-def _exception_fields(exc: BaseException) -> tuple[str, str, str | None]:
-    if isinstance(exc, _RecordedFailure):
-        error_type = exc.recorded_error_type or "recorded.failure"
-    else:
-        error_type = f"{type(exc).__module__}.{type(exc).__qualname__}"
-    message = str(exc).strip() or type(exc).__qualname__
-    message = message[:MAX_ERROR_MESSAGE_LENGTH]
-    raw_code = getattr(exc, "sqlstate", None)
-    error_code = str(raw_code).strip() if raw_code else None
-    return error_type, message, error_code
-
-
-def _canonical_event_payload(
+def _validate_transition(
     *,
-    run_id: UUID,
-    dataset: str,
     sequence_number: int,
-    attempt_number: int,
     from_status: str | None,
     to_status: str,
-    stage: str,
-    occurred_at: datetime,
-    previous_event_sha256: str | None,
-    error_type: str | None,
-    error_message: str | None,
-    error_code: str | None,
-    details: Mapping[str, object],
-) -> dict[str, object]:
+) -> None:
+    if to_status not in EXECUTION_STATUSES:
+        raise ExecutionTransitionError(f"Unsupported execution status: {to_status}")
+    if from_status is None:
+        if sequence_number != 1 or to_status != "created":
+            raise ExecutionTransitionError(
+                "Only the first created event may have no previous status."
+            )
+        return
+    allowed = _ALLOWED_TRANSITIONS.get(from_status)
+    if allowed is None or to_status not in allowed:
+        raise ExecutionTransitionError(
+            f"Unsupported execution transition: {from_status} -> {to_status}"
+        )
+
+
+def _canonical_event_payload(event: ExecutionEvent) -> dict[str, object]:
     return {
-        "journal_version": EXECUTION_JOURNAL_VERSION,
-        "run_id": str(run_id),
-        "dataset": dataset,
-        "sequence_number": sequence_number,
-        "attempt_number": attempt_number,
-        "from_status": from_status,
-        "to_status": to_status,
-        "stage": stage,
-        "occurred_at": occurred_at.isoformat(),
-        "previous_event_sha256": previous_event_sha256,
-        "error_type": error_type,
-        "error_message": error_message,
-        "error_code": error_code,
-        "details": dict(details),
+        "journal_version": event.journal_version,
+        "run_id": str(event.run_id),
+        "dataset": event.dataset,
+        "sequence_number": event.sequence_number,
+        "attempt_number": event.attempt_number,
+        "from_status": event.from_status,
+        "to_status": event.to_status,
+        "stage": event.stage,
+        "occurred_at": event.occurred_at.isoformat(),
+        "previous_event_sha256": event.previous_event_sha256,
+        "error_type": event.error_type,
+        "error_message": event.error_message,
+        "error_code": event.error_code,
+        "details": event.details,
     }
 
 
-def _event_hash(payload: Mapping[str, object]) -> str:
+def calculate_execution_event_sha256(event: ExecutionEvent) -> str:
+    """Calculate the canonical SHA-256 for one execution event."""
     canonical = json.dumps(
-        payload,
+        _canonical_event_payload(event),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
+
+
+def _exception_fields(exc: BaseException) -> tuple[str, str, str | None]:
+    error_type = f"{type(exc).__module__}.{type(exc).__qualname__}"
+    message = (str(exc).strip() or type(exc).__qualname__)[:MAX_ERROR_MESSAGE_LENGTH]
+    raw_code = getattr(exc, "sqlstate", None)
+    error_code = str(raw_code).strip() if raw_code else None
+    return error_type, message, error_code
 
 
 def build_execution_event(
@@ -165,19 +158,11 @@ def build_execution_event(
         raise ExecutionAuditError("Execution sequence_number must be positive.")
     if attempt_number < 0:
         raise ExecutionAuditError("Execution attempt_number must be non-negative.")
-    if to_status not in EXECUTION_STATUSES:
-        raise ExecutionTransitionError(f"Unsupported execution status: {to_status}")
-    if from_status is None:
-        if sequence_number != 1 or to_status != "created":
-            raise ExecutionTransitionError(
-                "Only the first created event may have no previous status."
-            )
-    else:
-        allowed = _ALLOWED_TRANSITIONS.get(from_status)
-        if allowed is None or to_status not in allowed:
-            raise ExecutionTransitionError(
-                f"Unsupported execution transition: {from_status} -> {to_status}"
-            )
+    _validate_transition(
+        sequence_number=sequence_number,
+        from_status=from_status,
+        to_status=to_status,
+    )
     if not stage.strip():
         raise ExecutionAuditError("Execution stage must not be empty.")
     if sequence_number == 1 and previous_event_sha256 is not None:
@@ -201,23 +186,7 @@ def build_execution_event(
     if to_status != "failed" and error is not None:
         raise ExecutionAuditError("Only failed execution events may contain an exception.")
 
-    event_details = dict(details or {})
-    payload = _canonical_event_payload(
-        run_id=run_id,
-        dataset=dataset,
-        sequence_number=sequence_number,
-        attempt_number=attempt_number,
-        from_status=from_status,
-        to_status=to_status,
-        stage=stage,
-        occurred_at=timestamp,
-        previous_event_sha256=previous_event_sha256,
-        error_type=error_type,
-        error_message=error_message,
-        error_code=error_code,
-        details=event_details,
-    )
-    return ExecutionEvent(
+    provisional = ExecutionEvent(
         journal_version=EXECUTION_JOURNAL_VERSION,
         run_id=run_id,
         dataset=dataset,
@@ -228,33 +197,36 @@ def build_execution_event(
         stage=stage,
         occurred_at=timestamp,
         previous_event_sha256=previous_event_sha256,
-        event_sha256=_event_hash(payload),
+        event_sha256="",
         error_type=error_type,
         error_message=error_message,
         error_code=error_code,
-        details=event_details,
+        details=dict(details or {}),
+    )
+    return ExecutionEvent(
+        journal_version=provisional.journal_version,
+        run_id=provisional.run_id,
+        dataset=provisional.dataset,
+        sequence_number=provisional.sequence_number,
+        attempt_number=provisional.attempt_number,
+        from_status=provisional.from_status,
+        to_status=provisional.to_status,
+        stage=provisional.stage,
+        occurred_at=provisional.occurred_at,
+        previous_event_sha256=provisional.previous_event_sha256,
+        event_sha256=calculate_execution_event_sha256(provisional),
+        error_type=provisional.error_type,
+        error_message=provisional.error_message,
+        error_code=provisional.error_code,
+        details=provisional.details,
     )
 
 
 def event_document(event: ExecutionEvent) -> dict[str, object]:
-    """Return the complete JSON-serializable representation of an event."""
-    payload = _canonical_event_payload(
-        run_id=event.run_id,
-        dataset=event.dataset,
-        sequence_number=event.sequence_number,
-        attempt_number=event.attempt_number,
-        from_status=event.from_status,
-        to_status=event.to_status,
-        stage=event.stage,
-        occurred_at=event.occurred_at,
-        previous_event_sha256=event.previous_event_sha256,
-        error_type=event.error_type,
-        error_message=event.error_message,
-        error_code=event.error_code,
-        details=event.details,
-    )
-    payload["event_sha256"] = event.event_sha256
-    return payload
+    """Return the complete JSON representation of an execution event."""
+    document = _canonical_event_payload(event)
+    document["event_sha256"] = event.event_sha256
+    return document
 
 
 class ExecutionJournal:
@@ -342,8 +314,7 @@ class ExecutionJournal:
         return self.transition("failed", stage, details=details, error=error)
 
     def _write(self, event: ExecutionEvent, *, exclusive: bool) -> None:
-        mode = "x" if exclusive else "a"
-        with self.path.open(mode, encoding="utf-8") as file:
+        with self.path.open("x" if exclusive else "a", encoding="utf-8") as file:
             json.dump(event_document(event), file, sort_keys=True, ensure_ascii=False)
             file.write("\n")
         self._events.append(event)
@@ -378,13 +349,11 @@ def _event_from_document(document: Mapping[str, object]) -> ExecutionEvent:
         isinstance(key, str) for key in details_raw
     ):
         raise ExecutionAuditError("Journal details must be a JSON object.")
-    details = {str(key): value for key, value in details_raw.items()}
     try:
         run_id = UUID(_required_string(document, "run_id"))
         occurred_at = datetime.fromisoformat(_required_string(document, "occurred_at"))
     except ValueError as exc:
         raise ExecutionAuditError("Journal contains an invalid UUID or timestamp.") from exc
-
     return ExecutionEvent(
         journal_version=_required_string(document, "journal_version"),
         run_id=run_id,
@@ -400,15 +369,54 @@ def _event_from_document(document: Mapping[str, object]) -> ExecutionEvent:
         error_type=_optional_string(document, "error_type"),
         error_message=_optional_string(document, "error_message"),
         error_code=_optional_string(document, "error_code"),
-        details=details,
+        details={str(key): value for key, value in details_raw.items()},
     )
+
+
+def validate_execution_event_chain(
+    events: tuple[ExecutionEvent, ...],
+) -> None:
+    """Verify event identities, transitions, hashes, and chain continuity."""
+    if not events:
+        raise ExecutionAuditError("Execution event chain is empty.")
+    first = events[0]
+    previous: ExecutionEvent | None = None
+    for event in events:
+        if event.journal_version != EXECUTION_JOURNAL_VERSION:
+            raise ExecutionAuditError("Unsupported execution journal version.")
+        if event.run_id != first.run_id or event.dataset != first.dataset:
+            raise ExecutionAuditError("Execution identity changed between events.")
+        _validate_transition(
+            sequence_number=event.sequence_number,
+            from_status=event.from_status,
+            to_status=event.to_status,
+        )
+        if event.event_sha256 != calculate_execution_event_sha256(event):
+            raise ExecutionAuditError(
+                f"Execution event hash mismatch at sequence {event.sequence_number}."
+            )
+        if previous is None:
+            if event.sequence_number != 1 or event.previous_event_sha256 is not None:
+                raise ExecutionAuditError("Execution chain does not begin correctly.")
+        else:
+            if event.sequence_number != previous.sequence_number + 1:
+                raise ExecutionAuditError("Execution sequence is not contiguous.")
+            if event.from_status != previous.to_status:
+                raise ExecutionAuditError("Execution status chain is discontinuous.")
+            if event.previous_event_sha256 != previous.event_sha256:
+                raise ExecutionAuditError("Execution hash chain is broken.")
+        if event.to_status == "failed":
+            if not event.error_type or not event.error_message:
+                raise ExecutionAuditError("Failed event is missing error metadata.")
+        elif event.error_type or event.error_message or event.error_code:
+            raise ExecutionAuditError("Non-failed event contains error metadata.")
+        previous = event
 
 
 def read_execution_journal(path: Path) -> ExecutionJournalSummary:
     """Read and cryptographically verify an append-only execution journal."""
     if not path.exists():
         raise FileNotFoundError(f"Execution journal not found: {path}")
-
     events: list[ExecutionEvent] = []
     with path.open(encoding="utf-8") as file:
         for line_number, line in enumerate(file, start=1):
@@ -422,63 +430,27 @@ def read_execution_journal(path: Path) -> ExecutionJournalSummary:
                 raise ExecutionAuditError(
                     f"Execution journal line {line_number} must be a JSON object."
                 )
-            event = _event_from_document(raw)
-            if event.journal_version != EXECUTION_JOURNAL_VERSION:
-                raise ExecutionAuditError("Unsupported execution journal version.")
-            expected = build_execution_event(
-                run_id=event.run_id,
-                dataset=event.dataset,
-                sequence_number=event.sequence_number,
-                attempt_number=event.attempt_number,
-                from_status=event.from_status,
-                to_status=event.to_status,
-                stage=event.stage,
-                previous_event_sha256=event.previous_event_sha256,
-                occurred_at=event.occurred_at,
-                error=(
-                    _RecordedFailure(
-                        event.error_message or "Recorded failure",
-                        event.error_type,
-                        event.error_code,
-                    )
-                    if event.to_status == "failed"
-                    else None
-                ),
-                details=event.details,
-            )
-            if expected.event_sha256 != event.event_sha256:
-                raise ExecutionAuditError(
-                    f"Execution journal hash mismatch at sequence {event.sequence_number}."
-                )
-            if events:
-                previous = events[-1]
-                if event.run_id != previous.run_id or event.dataset != previous.dataset:
-                    raise ExecutionAuditError("Execution journal identity changed between events.")
-                if event.sequence_number != previous.sequence_number + 1:
-                    raise ExecutionAuditError("Execution journal sequence is not contiguous.")
-                if event.previous_event_sha256 != previous.event_sha256:
-                    raise ExecutionAuditError("Execution journal hash chain is broken.")
-            events.append(event)
+            events.append(_event_from_document(raw))
 
-    if not events:
-        raise ExecutionAuditError("Execution journal is empty.")
-    first = events[0]
+    verified = tuple(events)
+    validate_execution_event_chain(verified)
+    first = verified[0]
     validated_at = next(
-        (event.occurred_at for event in events if event.to_status == "validated"),
+        (event.occurred_at for event in verified if event.to_status == "validated"),
         None,
     )
     failed_at = next(
-        (event.occurred_at for event in reversed(events) if event.to_status == "failed"),
+        (event.occurred_at for event in reversed(verified) if event.to_status == "failed"),
         None,
     )
     return ExecutionJournalSummary(
         run_id=first.run_id,
         dataset=first.dataset,
-        status=events[-1].to_status,
-        event_count=len(events),
-        head_sha256=events[-1].event_sha256,
+        status=verified[-1].to_status,
+        event_count=len(verified),
+        head_sha256=verified[-1].event_sha256,
         started_at=first.occurred_at,
         validated_at=validated_at,
         failed_at=failed_at,
-        events=tuple(events),
+        events=verified,
     )
