@@ -277,6 +277,39 @@ def _detect_existing_schema_version(connection: psycopg.Connection[Any]) -> int:
             )
         version = 6
 
+    terminology_tables = (
+        "terminology.code_systems",
+        "terminology.system_aliases",
+        "terminology.concepts",
+        "terminology.concept_mappings",
+    )
+    terminology_presence = tuple(
+        _table_exists(connection, table) for table in terminology_tables
+    )
+    normalized_presence = tuple(
+        _column_exists(connection, "clinical", table_name, "normalized_concept_id")
+        for table_name in ("diagnoses", "observations", "medications", "procedures")
+    )
+    normalized_view_present = _table_exists(
+        connection,
+        "terminology.normalized_clinical_codes",
+    )
+    if (
+        any(terminology_presence)
+        or any(normalized_presence)
+        or normalized_view_present
+    ):
+        if (
+            not all(terminology_presence)
+            or not all(normalized_presence)
+            or not normalized_view_present
+            or version < 6
+        ):
+            raise MigrationHistoryError(
+                "The database contains a partial terminology schema and cannot be baselined."
+            )
+        version = 7
+
     return version
 
 
