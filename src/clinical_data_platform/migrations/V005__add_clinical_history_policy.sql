@@ -44,8 +44,8 @@ AS $$
                 'encounter_id', p_encounter_id,
                 'patient_id', p_patient_id,
                 'encounter_type', p_encounter_type,
-                'start_datetime', p_start_datetime,
-                'end_datetime', p_end_datetime,
+                'start_datetime', p_start_datetime AT TIME ZONE 'UTC',
+                'end_datetime', p_end_datetime AT TIME ZONE 'UTC',
                 'source_system', p_source_system
             )::TEXT,
             'sha256'
@@ -75,7 +75,7 @@ AS $$
                 'encounter_id', p_encounter_id,
                 'code_system', p_code_system,
                 'diagnosis_code', p_diagnosis_code,
-                'diagnosis_datetime', p_diagnosis_datetime,
+                'diagnosis_datetime', p_diagnosis_datetime AT TIME ZONE 'UTC',
                 'source_system', p_source_system
             )::TEXT,
             'sha256'
@@ -107,7 +107,7 @@ AS $$
                 'observation_code', p_observation_code,
                 'value_numeric', p_value_numeric,
                 'unit', p_unit,
-                'observed_at', p_observed_at,
+                'observed_at', p_observed_at AT TIME ZONE 'UTC',
                 'source_system', p_source_system
             )::TEXT,
             'sha256'
