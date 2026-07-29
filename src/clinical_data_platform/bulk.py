@@ -53,7 +53,7 @@ def _identifier_list(names: Sequence[str]) -> sql.Composed:
 
 def _copy_rows_with_cursor(
     cursor: psycopg.Cursor[Any],
-    statement: sql.Composable,
+    statement: sql.Composed,
     rows: Iterable[Sequence[object]],
 ) -> int:
     count = 0
@@ -112,6 +112,7 @@ def copy_merge_rows(
         )
 
     conflict_columns = _identifier_list(plan.conflict_columns)
+    conflict_action: sql.SQL | sql.Composed
     if plan.update_columns:
         assignments: list[sql.Composable] = [
             sql.SQL("{} = EXCLUDED.{}").format(
