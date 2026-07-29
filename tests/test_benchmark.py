@@ -13,7 +13,7 @@ from clinical_data_platform.benchmark import (
     generate_benchmark_workload,
     run_loading_benchmark,
 )
-from clinical_data_platform.benchmark_cli import build_parser
+from clinical_data_platform.benchmark_cli import build_parser, main
 from clinical_data_platform.migration import migrate_database
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +54,7 @@ def test_benchmark_workload_is_deterministic_and_has_expected_ratios() -> None:
 def test_benchmark_cli_accepts_explicit_protocol() -> None:
     args = build_parser().parse_args(
         [
+            "--allow-destructive-reset",
             "--patients",
             "10",
             "20",
@@ -65,10 +66,20 @@ def test_benchmark_cli_accepts_explicit_protocol() -> None:
             "42",
         ]
     )
+    assert args.allow_destructive_reset is True
     assert args.patients == [10, 20]
     assert args.repetitions == 3
     assert args.warmups == 0
     assert args.seed == 42
+
+
+def test_benchmark_cli_rejects_missing_destructive_confirmation(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as error:
+        main(["--patients", "1", "--repetitions", "1", "--warmups", "0"])
+    assert error.value.code == 2
+    assert "--allow-destructive-reset is required" in capsys.readouterr().err
 
 
 def test_committed_reference_evidence_is_internally_consistent() -> None:
