@@ -1,10 +1,344 @@
 # Repository analysis guide
 
-This sequence reviews the repository after running the bundled demonstration.
+This sequence reviews the bundled demo and the reproducible Synthea source workflow.
 
-## 1. Run the complete workflow with captured logs
+## 1. Inspect the pinned Synthea profile
+
+```powershell
+clinical-data synthea-profile
+```
+
+Confirm:
+
+```text
+name = synthea-us-small-v1
+upstream ref = v4.0.0
+population = 100
+random seed = 20260729
+clinician seed = 20260730
+reference date = 2026-07-29
+state = Massachusetts
+thread pool = 1
+years of history = 0
+six included CSV files
+profile SHA-256 = 64 hexadecimal characters
+```
+
+Explain why the profile hash, upstream ref, resolved commit, and generated file hashes represent different identities.
+
+## 2. Exercise the adapter without running Java
+
+```powershell
+clinical-data synthea-adapt `
+  tests/fixtures/synthea/csv `
+  --output-dir data/synthea/review-normalized `
+  --replace
+
+clinical-data synthea-verify data/synthea/review-normalized
+```
+
+Expected fixture output:
+
+```text
+patients      2
+encounters    2
+diagnoses     2
+observations  3
+medications   2
+procedures    1
+```
+
+Expected omission:
+
+```text
+observation_outside_supported_subset = 1
+```
+
+The omitted row is body weight. It is structurally valid Synthea data but outside the current internal observation contract.
+
+## 3. Inspect the adaptation manifest
+
+```powershell
+Get-Content data/synthea/review-normalized/synthea-adaptation-manifest.json
+```
+
+Locate:
+
+```text
+adapter_version
+profile.sha256
+source_files
+output_files
+dataset_rows
+omitted_rows
+terminology_concepts
+adaptation_fingerprint
+```
+
+For every source and output file, verify that the manifest contains:
+
+```text
+header
+row_count
+size_bytes
+sha256
+```
+
+## 4. Demonstrate deterministic adaptation
+
+Run the adapter into two empty directories with the same fixture and profile.
+
+Compare:
+
+```powershell
+Get-FileHash data/synthea/review-a/*.csv -Algorithm SHA256
+Get-FileHash data/synthea/review-b/*.csv -Algorithm SHA256
+```
+
+Expected:
+
+```text
+all seven CSV hashes equal
+adaptation fingerprints equal
+UUIDv5 event identifiers equal
+```
+
+Equal row counts alone are insufficient evidence of identical outputs.
+
+## 5. Demonstrate source schema drift
+
+Copy the fixture and rename the patient header:
+
+```text
+BIRTHDATE → DATE_OF_BIRTH
+```
+
+The adapter must fail before transforming patients. This verifies that an upstream schema change cannot be interpreted silently by the v1 adapter.
+
+## 6. Demonstrate adaptation tamper detection
+
+After a successful adaptation, change one byte in an output CSV and execute:
+
+```powershell
+clinical-data synthea-verify data/synthea/review-normalized
+```
+
+Verification must reject the file hash or adaptation fingerprint.
+
+## 7. Inspect transformation semantics
+
+### Patient
+
+Verify:
+
+```text
+Synthea Id        → patient_id
+Synthea GENDER    → sex_at_birth
+Synthea BIRTHDATE → birth_date
+```
+
+### Encounter
+
+Verify:
+
+```text
+ambulatory → OUTPATIENT
+emergency  → EMERGENCY
+```
+
+### Diagnosis
+
+Confirm that `conditions.csv` becomes `diagnoses.csv` and receives deterministic UUIDv5 identifiers.
+
+### Observation
+
+Confirm mappings:
+
+```text
+8480-6 → SYSTOLIC_BP  → mmHg
+8462-4 → DIASTOLIC_BP → mmHg
+8867-4 → HEART_RATE   → bpm
+```
+
+### Medication
+
+Confirm:
+
+```text
+CODE interpreted as RXNORM
+blank STOP → ACTIVE
+STOP present → COMPLETED
+```
+
+### Procedure
+
+Confirm that the source system is normalized to one of:
+
+```text
+SNOMED
+CPT
+ICD10PCS
+```
+
+## 8. Inspect terminology candidates
+
+```powershell
+Import-Csv data/synthea/review-normalized/terminology.csv |
+    Format-Table
+```
+
+New Synthea source concepts must use:
+
+```text
+verification_status = unverified
+```
+
+This status describes local verification evidence. It does not state that the source concept is clinically invalid.
+
+## 9. Load the adapted fixture
+
+```powershell
+docker compose up -d postgres
+$env:DATABASE_URL = "postgresql://clinical_user:clinical_password@localhost:5432/clinical_data"
+
+clinical-data database-migrate
+clinical-data synthea-load `
+  data/synthea/review-normalized `
+  --processed-root data/processed/synthea-review `
+  --raw-root data/raw
+```
+
+The command must reuse:
+
+```text
+raw capture
+contracts
+quality reports
+execution journals
+structured logging
+durable run audit
+terminology resolution
+transactional persistence
+```
+
+No source-specific persistence algorithm should appear.
+
+## 10. Inspect Synthea-loaded runs
+
+```sql
+SELECT
+    run_id,
+    dataset_name,
+    status,
+    attempt_count,
+    source_path,
+    source_sha256,
+    contract_version,
+    audit_event_count
+FROM audit.pipeline_runs
+WHERE source_path LIKE '%synthea%'
+ORDER BY loaded_at;
+```
+
+Expected:
+
+```text
+six completed runs
+attempt_count = 1
+audit_event_count = 6
+```
+
+## 11. Inspect Synthea terminology imports
+
+```sql
+SELECT
+    code_system_id,
+    code,
+    display,
+    domain,
+    verification_status,
+    source_reference
+FROM terminology.concepts
+WHERE source_reference LIKE 'Synthea 4.0.0 CSV export%'
+ORDER BY code_system_id, code;
+```
+
+The fixture introduces two condition concepts not present in the curated subset. They should be `unverified` and use the `condition` domain.
+
+## 12. Run the full upstream generation
+
+Requirements:
+
+```text
+Git
+Java 17+
+network access for the initial clone
+```
 
 PowerShell:
+
+```powershell
+.\scripts\generate_synthea.ps1
+```
+
+The workflow creates:
+
+```text
+data/synthea/synthea-us-small-v1/
+├── upstream/synthea-4.0.0/
+├── generated/csv/
+├── normalized/
+├── synthea-generation-manifest.json
+└── normalized/synthea-adaptation-manifest.json
+```
+
+The generated workspace is ignored by Git.
+
+## 13. Inspect the generation manifest
+
+Confirm that it records:
+
+```text
+upstream_commit
+Java version
+normalized command
+profile SHA-256
+six exact source headers
+source row counts
+source byte sizes
+source SHA-256 hashes
+dataset_fingerprint
+```
+
+The command should use placeholders for machine-specific checkout and output paths.
+
+## 14. Compare two full generations
+
+Generate the same profile twice in separate workspaces.
+
+Compare:
+
+```text
+profile SHA-256
+upstream commit
+source file SHA-256 values
+dataset fingerprint
+adaptation fingerprint
+```
+
+Interpretation:
+
+```text
+all equal
+→ byte-identical generated and adapted artifacts
+
+same profile, different source hashes
+→ environment or upstream execution difference exposed by the manifest
+```
+
+Do not rewrite the manifest to force agreement.
+
+## 15. Run the bundled platform demo with logs
 
 ```powershell
 $env:CLINICAL_DATA_LOG_LEVEL = "INFO"
@@ -12,42 +346,9 @@ $env:CLINICAL_DATA_LOG_FORMAT = "json"
 clinical-data run-demo --repository-root . 2> data/clinical-data.jsonl
 ```
 
-The workflow captures six raw datasets, writes local execution journals, executes contracts, migrates PostgreSQL through V008, imports execution events, resolves coded concepts, persists accepted rows, builds the hypertension cohort, and emits correlated operational telemetry.
+The bundled demo remains a fast, deliberately invalid/valid sample for quality-control behavior. It is separate from the Synthea population.
 
-## 2. Inspect the structured log envelope
-
-```powershell
-Get-Content data/clinical-data.jsonl | Select-Object -First 5
-```
-
-Each line must parse as JSON and contain:
-
-```text
-schema_version = 1.0.0
-timestamp
-event
-component
-level
-message
-correlation_id
-```
-
-The complete demo should use one `correlation_id` across validation, persistence, and cohort operations. Individual datasets should have distinct `run_id` values.
-
-Useful events:
-
-```text
-cli.command.started
-pipeline.validation.completed
-persistence.transaction.completed
-cohort.database_build.completed
-demo.run.completed
-cli.command.completed
-```
-
-Confirm that operation completion records contain `duration_ms` and that logs do not contain patient identifiers or row values.
-
-## 3. Verify migration state
+## 16. Verify migration state
 
 ```powershell
 clinical-data database-status
@@ -63,54 +364,38 @@ latest=8
 pending=[]
 ```
 
-Inspect:
+Synthea does not add V009 because the feature introduces profiles, manifests, adapters, and CLI workflows rather than database structure.
 
-```sql
-SELECT version, name, checksum, execution_type, application_version, applied_at
-FROM public.schema_migrations
-ORDER BY version;
+## 17. Inspect structured logs
+
+```powershell
+Get-Content data/clinical-data.jsonl | Select-Object -First 10
 ```
 
-V008 should be `add_execution_lifecycle_audit`. Structured logging does not add V009 because it does not modify persistent schema.
-
-## 4. Inspect raw, processed, and execution artifacts
+Every line must be valid JSON with:
 
 ```text
-data/raw/
-├── objects/sha256/
-└── receipts/
-
-data/processed/<dataset>/
-├── execution/<run-id>.jsonl
-├── valid_<dataset>.csv
-├── invalid_<dataset>.csv
-├── validation_errors.csv
-└── quality_report.json
+schema_version
+timestamp
+level
+event
+component
+message
+correlation_id
 ```
 
-For one dataset, verify that the quality report records:
+Synthea operations use events such as:
 
 ```text
-run_id
-source and raw hashes
-contract path, version, and hash
-execution_journal_version
-execution_journal_path
-execution_event_count
-execution_journal_head_sha256
-status = validated
+synthea.checkout.started
+synthea.generation.started
+synthea.adaptation.started
+synthea.adaptation.completed
 ```
 
-The local journal should contain:
+Logs contain counts and fingerprints, not source clinical rows.
 
-```text
-created
-raw_captured
-validating
-validated
-```
-
-## 5. Inspect durable run state
+## 18. Inspect execution state
 
 ```sql
 SELECT
@@ -119,184 +404,24 @@ SELECT
     status,
     current_stage,
     attempt_count,
-    started_at,
-    validated_at,
-    loading_started_at,
-    completed_at,
-    failed_at,
-    audit_event_count,
-    audit_gap_reason
+    failure_code,
+    audit_event_count
 FROM audit.pipeline_runs
 ORDER BY updated_at DESC;
 ```
 
-After a clean demo, all six runs should be `completed`, each with `attempt_count = 1` and `audit_event_count = 6`.
-
-## 6. Inspect one execution timeline
-
-```sql
-SELECT
-    sequence_number,
-    attempt_number,
-    from_status,
-    to_status,
-    stage,
-    occurred_at,
-    error_type,
-    error_code,
-    error_message,
-    event_source,
-    previous_event_sha256,
-    event_sha256
-FROM audit.pipeline_run_timeline
-WHERE run_id = '<run-uuid>'
-ORDER BY sequence_number;
-```
-
-Expected clean sequence:
+A clean run has:
 
 ```text
-1 created       attempt 0 local_journal
-2 raw_captured  attempt 0 local_journal
-3 validating    attempt 0 local_journal
-4 validated     attempt 0 local_journal
-5 loading       attempt 1 database
-6 completed     attempt 1 database
+created
+raw_captured
+validating
+validated
+loading
+completed
 ```
 
-Confirm that every `previous_event_sha256` equals the prior row's `event_sha256`.
-
-## 7. Compare logs with the durable audit
-
-For the same `run_id`, locate log events:
-
-```bash
-jq 'select(.run_id == "<run-uuid>")' data/clinical-data.jsonl
-```
-
-The logs should describe operational stages and durations. PostgreSQL should describe authoritative state transitions and attempts.
-
-Expected distinction:
-
-```text
-log missing
-    → diagnostics may be incomplete
-    → durable audit still establishes final state
-
-audit row missing
-    → the run was not durably registered
-    → a log alone does not prove completed persistence
-```
-
-## 8. Validate a run programmatically
-
-```python
-from clinical_data_platform.run_audit import validate_pipeline_run_audit
-
-result = validate_pipeline_run_audit(connection, run_id)
-assert result.current_status == "completed"
-assert result.event_count == 6
-assert result.attempt_count == 1
-```
-
-This checks counts, heads, identities, transitions, hashes, chain continuity, local-journal boundary, and agreement between current state and final event.
-
-## 9. Demonstrate a durable and observable failure
-
-Validate encounters, then try to load them before patients.
-
-Expected database outcome:
-
-```text
-clinical.encounters = 0
-status = failed
-attempt_count = 1
-failure_code = 23503
-```
-
-Expected log events:
-
-```text
-persistence.transaction.failed
-persistence.failure_audited
-```
-
-The failure log should retain:
-
-```text
-error_type
-error_code = 23503
-attempt_number = 1
-```
-
-It must not retain the rejected patient identifier from PostgreSQL `DETAIL` output.
-
-Inspect durable state:
-
-```sql
-SELECT
-    status,
-    current_stage,
-    attempt_count,
-    failure_stage,
-    failure_type,
-    failure_code,
-    failure_message,
-    failed_at
-FROM audit.pipeline_runs
-WHERE run_id = '<encounter-run-uuid>';
-```
-
-The clinical transaction must be empty, while the run and failure timeline remain committed.
-
-## 10. Demonstrate retry semantics
-
-After the previous failure:
-
-1. load patients;
-2. load the same validated encounter outputs again.
-
-Expected timeline:
-
-```text
-...
-5 loading    attempt 1
-6 failed     attempt 1
-7 loading    attempt 2
-8 completed  attempt 2
-```
-
-The logs should include a second persistence attempt with `attempt_number = 2`. The final projection is completed, while event 6 remains historical evidence.
-
-## 11. Inspect active contracts
-
-```powershell
-clinical-data list-contracts
-clinical-data validate-contracts
-clinical-data show-contract diagnoses
-clinical-data show-contract observations
-clinical-data show-contract medications
-clinical-data show-contract procedures
-```
-
-Contracts validate source structure and declared categorical systems. They do not contain complete external terminology releases.
-
-## 12. Inspect terminology systems and bindings
-
-```sql
-SELECT
-    code_system_id,
-    canonical_uri,
-    display_name,
-    upstream_version,
-    subset_version,
-    complete_release,
-    license_note
-FROM terminology.code_systems
-ORDER BY code_system_id;
-```
-
-External systems should be marked as incomplete local subsets.
+## 19. Inspect terminology bindings
 
 ```sql
 SELECT
@@ -306,134 +431,49 @@ SELECT
     source_code,
     normalized_system,
     normalized_code,
-    normalized_display,
     domain,
     verification_status
 FROM terminology.normalized_clinical_codes
 ORDER BY dataset_name, entity_id;
 ```
 
-Expected local observation mappings:
+Distinguish curated project mappings from dynamically imported unverified Synthea concepts.
 
-```text
-SYSTOLIC_BP  → LOINC 8480-6
-DIASTOLIC_BP → LOINC 8462-4
-HEART_RATE   → LOINC 8867-4
-```
+## 20. Review code in this order
 
-## 13. Inspect six entity counts
+1. `synthea_profiles/reproducible_small.toml`;
+2. profile loader in `synthea.py`;
+3. `build_synthea_command`;
+4. generation manifest functions;
+5. source header definitions;
+6. six adapter functions;
+7. adaptation manifest functions;
+8. terminology import;
+9. `load_adapted_synthea_dataset`;
+10. `tests/test_synthea.py`;
+11. existing `pipeline.py` and `database.py` to confirm reuse.
 
-```sql
-SELECT 'patients' AS dataset, COUNT(*) FROM clinical.patients
-UNION ALL SELECT 'encounters', COUNT(*) FROM clinical.encounters
-UNION ALL SELECT 'diagnoses', COUNT(*) FROM clinical.diagnoses
-UNION ALL SELECT 'observations', COUNT(*) FROM clinical.observations
-UNION ALL SELECT 'medications', COUNT(*) FROM clinical.medications
-UNION ALL SELECT 'procedures', COUNT(*) FROM clinical.procedures
-ORDER BY dataset;
-```
+## 21. Key design questions
 
-Expected:
+- Why are both random and clinician seeds fixed?
+- Why is the reference date part of the dataset identity?
+- Why is the resolved commit stored in addition to the tag?
+- Why is generation single-threaded?
+- What does the generation fingerprint cover?
+- What does the adaptation fingerprint add?
+- Why do missing source IDs become UUIDv5 rather than random UUIDv4?
+- Why are unsupported observations omitted with counts?
+- Why are new source concepts imported as unverified?
+- Why does normal CI not execute the complete Java generator?
+- Why is Synthea a source adapter rather than a new pipeline?
 
-```text
-patients      5
-encounters    7
-diagnoses     6
-observations 13
-medications   6
-procedures    6
-```
+## 22. Known limitations
 
-## 14. Inspect patient history
-
-```sql
-SELECT
-    patient_version_id,
-    patient_id,
-    record_sha256,
-    valid_from_run_id,
-    valid_to_run_id,
-    valid_from,
-    valid_to,
-    is_current
-FROM clinical.patient_history
-ORDER BY patient_id, patient_version_id;
-```
-
-Confirm one current version per accepted patient.
-
-## 15. Inspect cohort stability and logs
-
-```sql
-SELECT *
-FROM analytics.hypertension_features
-ORDER BY patient_id;
-```
-
-Expected patients remain `P001` and `P002`.
-
-The logs should include:
-
-```text
-cohort.source_runs.completed
-cohort.database_build.completed
-cohort.export.completed
-cohort.run.completed
-```
-
-Only aggregate `row_count` is logged. The patient values remain in the analytical output, not in telemetry.
-
-## 16. Demonstrate tamper detection
-
-### Local journal
-
-Change a field in one JSONL journal line without recalculating hashes. Persistence must reject the journal before registering the run.
-
-### PostgreSQL event
-
-Change one stored `event_sha256` and run `validate_pipeline_run_audit`. Validation must reject the durable chain.
-
-### Structured logs
-
-Logs are not hash chained. Modifying a collected log file is not detected by the application. This is an intentional distinction from the audit design.
-
-## 17. Review code in this order
-
-1. `structured_logging.py`;
-2. `entrypoint.py`;
-3. `execution.py`;
-4. `pipeline.py`;
-5. `V008__add_execution_lifecycle_audit.sql`;
-6. `run_audit.py`;
-7. `database.py`;
-8. `cohort.py`;
-9. `demo.py`;
-10. `tests/test_structured_logging.py`;
-11. `tests/test_run_audit.py`;
-12. `tests/test_analysis_workflow.py`.
-
-## 18. Key design questions
-
-- Why are logs and the durable audit separate?
-- Why does the CLI use stderr for telemetry and stdout for results?
-- What does a correlation ID identify?
-- Why does a correlation ID not replace `run_id`?
-- Why are durations measured with a monotonic clock?
-- Why is SQLSTATE more useful than matching an error message?
-- Why must clinical values be omitted before redaction?
-- Why is validation `validated` rather than `completed`?
-- Why must the loading state commit before clinical inserts?
-- What is the difference between a run, an attempt, and a correlation?
-- What does a hash chain detect that a normal log file does not?
-
-## 19. Known limitations
-
-- local journal rather than WORM storage;
-- structured stderr logs without centralized shipping or managed retention;
-- no distributed tracing, metrics, dashboards, or alerting;
-- no scheduler heartbeat or stale-loading recovery;
-- small terminology subsets;
-- small synthetic fixtures;
-- no bulk `COPY` or performance benchmark;
-- one demonstrative cohort;
-- no PHI controls or production deployment claims.
+- full upstream generation is external to normal CI;
+- the packaged profile contains 100 patients, not a benchmark-scale population;
+- only six Synthea CSV files are adapted;
+- only three observation concepts are retained;
+- dynamic terminology imports are unverified;
+- loading is still row-wise rather than PostgreSQL `COPY`;
+- no epidemiological representativeness claim;
+- no PHI controls or production deployment claim.
