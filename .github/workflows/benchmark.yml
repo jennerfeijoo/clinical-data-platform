@@ -26,6 +26,7 @@ permissions:
 
 jobs:
   governed-loading:
+    name: Governed loading (Python 3.11 reference)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -52,8 +53,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -62,6 +63,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
+          python -m pip check
 
       - name: Run governed loading benchmark
         run: |
