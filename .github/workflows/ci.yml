@@ -60,11 +60,12 @@ jobs:
           clinical-data synthea-verify "$NORMALIZED"
           python -c "import json, pathlib, sys; d=json.loads(pathlib.Path(sys.argv[1]).read_text()); assert d['upstream']['ref']=='v4.0.0'; assert d['generation']['random_seed']==20260729; assert d['generation']['thread_pool_size']==1" "$RUNNER_TEMP/synthea-profile.json"
 
-      - name: Exercise independent Synthea cohort comparison
+      - name: Exercise independent cohort quality evidence
         run: |
           COHORT_A="$RUNNER_TEMP/cohort-a"
           COHORT_B="$RUNNER_TEMP/cohort-b"
           COMPARISON="$RUNNER_TEMP/cohort-comparison"
+          QUALITY="$RUNNER_TEMP/cohort-quality"
           clinical-data-cohort list-profiles
           clinical-data-cohort adapt synthea-us-small-v1 \
             tests/fixtures/synthea/csv --output-dir "$COHORT_A"
@@ -72,7 +73,10 @@ jobs:
             tests/fixtures/synthea/cohort_b/csv --output-dir "$COHORT_B"
           clinical-data-cohort compare "$COHORT_A" "$COHORT_B" \
             --output-dir "$COMPARISON"
+          clinical-data-cohort quality-report "$COHORT_A" "$COHORT_B" \
+            --output-dir "$QUALITY"
           python -c "import json, pathlib, sys; d=json.loads(pathlib.Path(sys.argv[1]).read_text()); assert d['comparison_fingerprint']; assert all(value==0 for value in d['identifier_overlap_counts'].values()); assert len(d['cohorts'])==2" "$COMPARISON/synthea-cohort-comparison.json"
+          python -c "import csv, json, pathlib, sys; root=pathlib.Path(sys.argv[1]); d=json.loads((root/'synthea-quality-report.json').read_text()); assert d['quality_fingerprint']; assert d['schema_version']=='1.0.0'; rows=list(csv.DictReader((root/'attrition.csv').open())); obs=[r for r in rows if r['cohort']=='cohort_a' and r['dataset']=='observations']; assert obs[0]['source_rows']=='4'; assert obs[0]['adapted_rows']=='3'; assert obs[0]['omitted_rows']=='1'; missing=list(csv.DictReader((root/'adapted-missingness.csv').open())); assert not [r for r in missing if r['required']=='True' and r['missing_count']!='0']" "$QUALITY"
 
       - name: Validate packaged contracts
         run: clinical-data validate-contracts
@@ -116,6 +120,11 @@ jobs:
         run: >-
           docker run --rm --entrypoint clinical-data-cohort
           clinical-data-platform:ci list-profiles
+
+      - name: Smoke-test container quality-report command
+        run: >-
+          docker run --rm --entrypoint clinical-data-cohort
+          clinical-data-platform:ci quality-report --help
 
       - name: Smoke-test packaged container migrations
         run: >-
