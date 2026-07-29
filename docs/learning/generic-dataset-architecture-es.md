@@ -2,14 +2,13 @@
 
 ## Propósito
 
-Esta guía explica el refactor que eliminó el pipeline especial para pacientes. No está pensada para que memorices archivos, sino para que puedas:
+Esta guía explica el refactor que eliminó el pipeline especial para pacientes. El repositorio ha evolucionado después de ese hito: las reglas que antes se asociaban al registro ahora viven en contratos TOML ejecutables y versionados.
 
-- explicar el problema arquitectónico original;
-- justificar la solución adoptada;
-- seguir el recorrido completo de una ejecución;
-- añadir un dataset sin modificar el pipeline;
-- diagnosticar errores;
-- realizar cambios específicos sin depender de IA.
+Para estudiar el hito siguiente, consulta:
+
+```text
+docs/learning/versioned-executable-contracts-es.md
+```
 
 ## 1. El problema original
 
@@ -25,43 +24,16 @@ encounters / diagnoses / observations
   └── persist_entity_validation_outputs()
 ```
 
-Aunque ambos caminos realizaban casi las mismas etapas, estaban implementados en módulos distintos:
+Aunque ambos realizaban casi las mismas etapas, estaban implementados en módulos distintos. Esto generaba:
 
-```text
-pipeline.py
-entity_pipeline.py
-
-database.py
-entity_database.py
-```
-
-Esto generaba cuatro problemas.
-
-### 1.1 Duplicación
-
-Los dos pipelines calculaban checksum, generaban UUID, leían CSV, escribían archivos válidos e inválidos, producían errores y generaban un reporte JSON.
-
-### 1.2 Tratamiento excepcional de pacientes
-
-`patients` era conceptualmente otro dataset registrado, pero la arquitectura lo trataba como una excepción. Cada nueva capacidad debía decidir si se implementaba en el camino de pacientes, en el camino de entidades o en ambos.
-
-### 1.3 Riesgo de divergencia
-
-Dos implementaciones inicialmente equivalentes tienden a evolucionar de forma diferente. Por ejemplo, un cambio en el formato de errores podía aplicarse a un pipeline y olvidarse en el otro.
-
-### 1.4 Extensión costosa
-
-Añadir `medications` habría requerido modificar varias ramas condicionales y posiblemente crear más funciones específicas.
+- duplicación;
+- tratamiento excepcional de pacientes;
+- riesgo de divergencia;
+- extensión costosa.
 
 ## 2. La decisión arquitectónica
 
-El refactor separa dos tipos de conocimiento:
-
-```text
-Lo que nunca cambia entre datasets
-vs.
-Lo que sí cambia entre datasets
-```
+El refactor separó comportamiento invariante y variable.
 
 ### Comportamiento invariante
 
@@ -86,102 +58,99 @@ database.py
 
 ### Comportamiento variable
 
-Cada dataset cambia en:
+Actualmente se divide en dos categorías.
+
+#### Interfaz y reglas declarativas
+
+```text
+contracts/<dataset>/vX.Y.Z.toml
+```
+
+Incluyen:
 
 - columnas;
-- identificador principal;
-- reglas de validación;
-- conversión de strings a tipos Python;
-- sentencia SQL de upsert.
+- clave primaria;
+- obligatoriedad;
+- unicidad;
+- tipos;
+- categorías;
+- reglas temporales;
+- perfiles de medición.
 
-Ese comportamiento vive en una `DatasetDefinition` registrada en:
+#### Persistencia controlada
 
 ```text
 registry.py
 ```
 
-## 3. Componentes principales
+Incluye:
 
-## 3.1 `models.py`
+- conversión de strings a tipos Python;
+- sentencia SQL de upsert.
 
-Define el lenguaje común que el pipeline entiende.
-
-### `ValidationError`
-
-Todos los validadores deben convertir sus errores a esta estructura:
-
-```python
-ValidationError(
-    row_number=..., 
-    entity_id=..., 
-    patient_id=..., 
-    field=..., 
-    rule=..., 
-    message=..., 
-    value=...,
-)
-```
-
-El pipeline no necesita saber si el error provino de un paciente, un encuentro o una observación.
-
-### `ValidationResult`
-
-Contiene:
+## 3. Arquitectura actual
 
 ```text
-valid_records
-invalid_records
-errors
+CLI
+  ↓
+Dataset registry
+  ↓
+Contract manifest
+  ↓
+Versioned executable contract
+  ↓
+Generic validation pipeline
+  ↓
+Quality outputs
+  ↓
+Generic persistence workflow
+  ↓
+PostgreSQL
 ```
 
-### `DatasetPipelineSummary`
-
-Resume una ejecución y expone las rutas de salida.
-
-## 3.2 `registry.py`
-
-Es el punto de extensión de la plataforma.
-
-Cada entrada contiene una `DatasetDefinition`:
+No existe:
 
 ```python
-DatasetDefinition(
-    name="patients",
-    columns=(...),
-    id_column="patient_id",
-    validator=_validate_patients,
-    row_builder=_patient_rows,
-    upsert_sql=PATIENT_UPSERT_SQL,
-)
+if dataset == "patients":
 ```
 
-El registro responde cinco preguntas:
+dentro de `pipeline.py` o `database.py`.
 
-1. ¿Cómo se llama el dataset?
-2. ¿Qué columnas tiene?
-3. ¿Cuál es su identificador?
-4. ¿Cómo se valida?
-5. ¿Cómo se transforma y persiste?
+## 4. Componentes principales
 
-## 3.3 `pipeline.py`
+### `models.py`
 
-Expone una única operación:
+Define el lenguaje común:
+
+```text
+ValidationError
+ValidationResult
+DatasetPipelineSummary
+```
+
+### `contract.py`
+
+Carga y ejecuta contratos. Es la fuente de verdad para la interfaz de datos.
+
+### `registry.py`
+
+Mantiene únicamente comportamiento de persistencia que no conviene convertir en configuración libre.
+
+### `pipeline.py`
+
+Expone:
 
 ```python
-run_dataset_validation(
-    dataset,
-    input_path,
-    output_directory,
-    reference_date=...,
-)
+run_dataset_validation(...)
 ```
 
-Su lógica es genérica:
+Secuencia:
 
 ```text
 obtener definición
+→ cargar contrato activo
 → leer CSV
-→ ejecutar validador registrado
+→ ejecutar contrato
 → escribir válidos
 → escribir inválidos
 → escribir errores
@@ -189,32 +158,20 @@ obtener definición
 → devolver resumen
 ```
 
-No contiene:
+### `database.py`
+
+Expone:
 
 ```python
-if dataset == "patients":
+persist_dataset_validation_outputs(...)
 ```
 
-Esa ausencia es una señal importante: el pipeline no conoce detalles clínicos específicos.
-
-## 3.4 `database.py`
-
-Expone una única operación:
-
-```python
-persist_dataset_validation_outputs(
-    connection,
-    dataset,
-    output_directory,
-)
-```
-
-Su lógica es:
+Secuencia:
 
 ```text
-obtener definición
-→ leer quality report
+leer quality report
 → verificar conteos
+→ verificar contrato histórico y hash
 → convertir registros mediante row_builder
 → insertar pipeline_run
 → ejecutar upsert_sql
@@ -222,217 +179,138 @@ obtener definición
 → confirmar transacción
 ```
 
-El módulo no necesita saber qué columnas particulares tiene una observación o un diagnóstico.
+## 5. Qué cambió respecto al primer refactor
 
-## 3.5 Validadores clínicos
-
-Las reglas específicas siguen separadas:
+En la versión `0.3.0`, `DatasetDefinition` contenía:
 
 ```text
-validation.py          → pacientes
-clinical_entities.py   → encuentros, diagnósticos y observaciones
-```
-
-La arquitectura genérica no significa que todos los datasets tengan las mismas reglas. Significa que todos cumplen la misma interfaz.
-
-## 4. Recorrido de una ejecución
-
-Ejemplo:
-
-```powershell
-clinical-data validate-dataset patients data/sample/patients.csv
-```
-
-### Paso 1
-
-El CLI recibe `patients`.
-
-### Paso 2
-
-`run_dataset_validation()` consulta:
-
-```python
-get_dataset_definition("patients")
-```
-
-### Paso 3
-
-El registro devuelve la definición de pacientes.
-
-### Paso 4
-
-El pipeline lee el CSV y ejecuta:
-
-```python
-definition.validator(records, reference_date)
-```
-
-### Paso 5
-
-El adaptador de pacientes transforma los errores específicos al modelo genérico.
-
-### Paso 6
-
-El pipeline escribe:
-
-```text
-valid_patients.csv
-invalid_patients.csv
-validation_errors.csv
-quality_report.json
-```
-
-### Paso 7
-
-La carga usa la misma clave `patients` para recuperar:
-
-```text
+columns
+id_column
+validator
 row_builder
 upsert_sql
 ```
 
-## 5. Por qué se usan adaptadores
-
-Los validadores existentes no tenían exactamente el mismo tipo de error:
+En la versión `0.4.0`, columnas, clave y reglas se trasladaron al contrato. `DatasetDefinition` conserva:
 
 ```text
-ValidationError de pacientes
-EntityValidationError de otras entidades
+name
+row_builder
+upsert_sql
 ```
 
-En lugar de reescribir inmediatamente todas las reglas clínicas, el registro incluye adaptadores que normalizan sus resultados.
+Y expone columnas y clave consultando el contrato activo.
 
-Este patrón permite refactorizar por etapas:
-
-```text
-código existente
-→ adaptador
-→ interfaz común
-```
-
-Ventaja: reduce el riesgo de modificar simultáneamente arquitectura y reglas clínicas.
-
-Costo: todavía existe una capa temporal de normalización que puede simplificarse en un refactor posterior.
+Este cambio elimina una segunda fuente de verdad en Python.
 
 ## 6. Principios aplicados
 
 ### Open/Closed Principle
 
-El pipeline está cerrado a modificaciones frecuentes, pero abierto a nuevas definiciones de datasets.
-
-### Dependency Inversion
-
-El pipeline depende de una interfaz y del registro, no de funciones concretas de pacientes.
+El pipeline permanece cerrado a modificaciones frecuentes, pero abierto a nuevos datasets mediante contratos y adaptadores.
 
 ### Separation of Concerns
 
-- reglas clínicas: validadores;
-- configuración: registro;
-- flujo: pipeline;
-- persistencia: database;
-- interfaz: CLI.
+```text
+contrato        → interfaz y reglas
+contract engine → ejecución de reglas
+registry        → persistencia específica
+pipeline        → orquestación
+PostgreSQL      → integridad relacional
+CLI             → interacción
+```
 
-### Single Source of Dispatch
+### Single Source of Truth
 
-La selección del comportamiento se concentra en `DATASET_REGISTRY`, en lugar de distribuirse entre varios `if`.
+La estructura aceptada del dataset vive en el contrato, no simultáneamente en documentación y constantes Python.
 
-## 7. Qué debes ser capaz de explicar en una entrevista
+### Dependency Inversion
 
-### Pregunta: ¿Por qué eliminaste el pipeline especial de pacientes?
+El pipeline depende de modelos y contratos abstractos, no de funciones concretas de pacientes.
 
-Respuesta esperada:
+## 7. Cómo añadir un dataset
 
-> Porque pacientes y las demás entidades compartían el mismo ciclo de ingestión, validación, generación de outputs y persistencia. Mantener dos implementaciones duplicaba lógica y aumentaba el riesgo de divergencia. Moví las diferencias a un registro de definiciones y dejé un único pipeline invariante.
+Para añadir `labs` sin modificar `pipeline.py` ni `database.py`:
 
-### Pregunta: ¿Qué es `DatasetDefinition`?
+1. crear `contracts/labs/v1.0.0.toml`;
+2. añadirlo al manifest;
+3. añadir `DatasetDefinition` con row builder y upsert;
+4. crear la tabla o migración;
+5. añadir fixtures;
+6. añadir pruebas;
+7. documentar la interfaz.
 
-> Es un objeto de configuración ejecutable que agrupa las columnas, el identificador, el validador, la conversión de registros y el SQL de persistencia de un dataset.
+La arquitectura no hace que todos los datasets sean iguales. Hace que todos cumplan el mismo ciclo de ejecución.
 
-### Pregunta: ¿Cómo añadirías medicamentos?
+## 8. Preguntas de entrevista
 
-> Implementaría sus reglas, su conversor de filas y su sentencia SQL; después registraría una nueva `DatasetDefinition`. No modificaría `pipeline.py`.
+### ¿Por qué eliminaste el pipeline especial de pacientes?
 
-### Pregunta: ¿Cuál es una limitación de este diseño?
+> Porque pacientes y las demás entidades compartían el mismo ciclo de ingestión, validación, generación de outputs y persistencia. Mantener dos implementaciones duplicaba lógica y aumentaba el riesgo de divergencia.
 
-> Las definiciones son Python ejecutable, no contratos declarativos. Además, el registro contiene SQL y funciones de conversión, por lo que todavía puede dividirse en contratos, validadores y adaptadores de persistencia más independientes.
+### ¿Qué función cumple ahora `DatasetDefinition`?
 
-## 8. Ejercicios obligatorios
+> Asocia el nombre del dataset con su comportamiento de persistencia. La interfaz y las reglas de validación ya no se duplican allí; se obtienen del contrato activo.
 
-No consideres comprendido el refactor hasta resolver estos ejercicios sin copiar una solución generada.
+### ¿Por qué el pipeline no conoce reglas clínicas?
 
-### Ejercicio 1: dibujar la arquitectura
+> Porque su responsabilidad es orquestar. Las reglas cambian por dataset y se describen en contratos ejecutables.
+
+### ¿Cómo añadirías medicamentos?
+
+> Crearía un contrato versionado, el adaptador de persistencia, la tabla o migración y las pruebas. No modificaría el pipeline genérico.
+
+### ¿Cuál es una limitación actual?
+
+> El lenguaje de reglas es deliberadamente limitado y el SQL aún está asociado al registro. Además, faltan migraciones formales, raw storage y estrategia histórica de registros.
+
+## 9. Ejercicios personales
+
+### Ejercicio 1
 
 Dibuja de memoria:
 
 ```text
 CLI
 → registry
+→ manifest
+→ contract
 → pipeline
-→ validator
 → outputs
 → database
 → PostgreSQL
 ```
 
-Explica qué conoce y qué no conoce cada capa.
+### Ejercicio 2
 
-### Ejercicio 2: rastreo manual
+Rastrea `P006` desde `patients.csv` hasta `audit.validation_errors`.
 
-Elige `P006` en `patients.csv` y sigue manualmente:
+### Ejercicio 3
 
-1. lectura;
-2. normalización;
-3. regla que falla;
-4. error generado;
-5. fila de cuarentena;
-6. entrada en quality report;
-7. entrada en `audit.validation_errors`.
+Explica por qué cambiar una regla de presión arterial no requiere editar `pipeline.py`.
 
-### Ejercicio 3: añadir `labs`
+### Ejercicio 4
 
-Crea temporalmente:
+Añade una columna opcional en una nueva versión del contrato de pacientes.
 
-```text
-lab_id,patient_id,test_code,value_numeric,unit,observed_at,source_system
-```
+### Ejercicio 5
 
-Añade el dataset solo mediante:
+Argumenta a favor y en contra de mantener `upsert_sql` dentro de `DatasetDefinition`.
 
-- validador;
-- row builder;
-- SQL;
-- registro;
-- tabla PostgreSQL;
-- pruebas.
-
-No modifiques `pipeline.py` ni `database.py`.
-
-### Ejercicio 4: introducir un fallo
-
-Cambia deliberadamente el nombre de un campo en `quality_report.json` y explica por qué la persistencia lo rechaza.
-
-### Ejercicio 5: cambiar una regla
-
-Amplía el rango permitido de frecuencia cardiaca y actualiza su prueba. Explica qué archivos no deben cambiar.
-
-### Ejercicio 6: revisar una decisión
-
-Argumenta a favor y en contra de colocar `upsert_sql` dentro de `DatasetDefinition`.
-
-## 9. Prueba de dominio personal
+## 10. Prueba de dominio personal
 
 Puedes afirmar que dominas esta parte cuando seas capaz de:
 
-- explicar el problema original sin leer el código;
-- dibujar la arquitectura;
+- explicar el problema original;
+- dibujar la arquitectura actual;
 - describir la responsabilidad de cada módulo;
+- distinguir contrato y adaptador;
 - añadir un dataset pequeño;
-- localizar una regla clínica;
-- modificar una salida;
+- localizar y modificar una regla;
 - interpretar una prueba fallida;
 - justificar una decisión y reconocer sus costos.
 
-## 10. Uso responsable de IA
+## 11. Uso responsable de IA
 
 La IA puede acelerar:
 
@@ -448,10 +326,10 @@ No reemplaza:
 - juicio de diseño;
 - responsabilidad sobre errores;
 - capacidad de mantenimiento;
-- honestidad sobre la autoría del trabajo.
+- honestidad sobre la autoría.
 
 Una formulación profesional y honesta sería:
 
 > Desarrollé el proyecto usando IA como asistente de ingeniería. Definí el objetivo, revisé la arquitectura, validé los cambios mediante pruebas y estudié cada componente hasta poder explicarlo y modificarlo.
 
-No sería correcto afirmar que escribiste manualmente cada línea. Tampoco sería correcto reducir tu papel a “pagué por el resultado” si realmente comprendes, verificas, decides y mantienes el sistema. La contribución profesional se demuestra por la capacidad de responder por el diseño y evolucionarlo.
+La contribución profesional se demuestra por la capacidad de responder por el diseño y evolucionarlo.
