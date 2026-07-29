@@ -17,7 +17,7 @@ from clinical_data_platform import __version__
 
 MIGRATION_PACKAGE: Final = "clinical_data_platform.migrations"
 MIGRATION_PATTERN: Final = re.compile(
-    r"^V(?P<version>[1-9]\d{2})__(?P<name>[a-z0-9_]+)\.sql$"
+    r"^V(?P<version>\d{3})__(?P<name>[a-z0-9_]+)\.sql$"
 )
 MIGRATION_LOCK_ID: Final = 734_202_607_29
 HISTORY_TABLE: Final = "public.schema_migrations"
