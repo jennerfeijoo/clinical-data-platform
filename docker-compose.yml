@@ -15,5 +15,17 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  app:
+    build: .
+    profiles: ["demo"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-clinical_user}:${POSTGRES_PASSWORD:-clinical_password}@postgres:5432/${POSTGRES_DB:-clinical_data}
+    volumes:
+      - ./data:/app/data
+    command: ["run-demo", "--repository-root", "/app"]
+
 volumes:
   postgres_data:
