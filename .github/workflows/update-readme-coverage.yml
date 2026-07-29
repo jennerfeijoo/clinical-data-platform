@@ -1,0 +1,80 @@
+name: Update coverage milestone documentation
+
+on:
+  push:
+    branches:
+      - feat/enforce-90-percent-coverage
+    paths:
+      - .github/workflows/update-readme-coverage.yml
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/enforce-90-percent-coverage
+          fetch-depth: 0
+
+      - name: Update README coverage milestone
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("README.md")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace(
+              "> Status: active development toward `1.0.0` — version `0.16.0` adds reproducible, contract-aware attrition and missingness reports for two independently seeded Synthea cohorts.",
+              "> Status: active development toward `1.0.0` — version `0.17.0` enforces at least 90% statement coverage with behavioral tests across command, orchestration, Synthea, PostgreSQL, and failure boundaries.",
+          )
+          marker = "## Two reproducible Synthea cohorts\n"
+          section = """## Mandatory test coverage
+
+Version `0.17.0` makes statement coverage an executable merge condition:
+
+```text
+3,935 measured statements
+3,547 covered statements
+388 missed statements
+90.14% total coverage
+142 tests passed
+required minimum: 90%
+```
+
+A normal `python -m pytest` run executes pytest-cov and fails when total package coverage falls below 90%. The milestone adds behavioral tests for the primary CLI, cohort CLI, benchmark CLI, demo orchestration, logging entrypoint, Synthea profile governance, source-artifact validation, external command failures, Git checkout state, and Java version guards.
+
+The percentage is a regression barrier, not evidence of clinical correctness, complete security, production capacity, or PHI readiness.
+
+Technical policy: [`docs/testing-coverage.md`](docs/testing-coverage.md).
+
+Spanish guide: [`docs/learning/cobertura-pruebas-90-es.md`](docs/learning/cobertura-pruebas-90-es.md).
+
+"""
+          if section not in text:
+              text = text.replace(marker, section + marker)
+          text = text.replace(
+              "python -m pytest --cov=clinical_data_platform --cov-report=term-missing",
+              "python -m pytest",
+          )
+          text = text.replace(
+              "- reproducible attrition, omission-reason, missingness, and completeness reports;\n",
+              "- reproducible attrition, omission-reason, missingness, and completeness reports;\n- mandatory statement coverage of at least 90% with behavioral command and failure-path tests;\n",
+          )
+          text = text.replace(
+              "## Documentation\n\n",
+              "## Documentation\n\n- [`docs/testing-coverage.md`](docs/testing-coverage.md): mandatory coverage policy, evidence, and limits;\n- [`docs/learning/cobertura-pruebas-90-es.md`](docs/learning/cobertura-pruebas-90-es.md): Spanish testing and coverage guide;\n",
+          )
+          text = text.replace("- coverage of at least 90%;\n", "")
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Commit README update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "Document mandatory coverage milestone"
+          git push origin HEAD:feat/enforce-90-percent-coverage
