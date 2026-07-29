@@ -1,6 +1,6 @@
 # Clinical Data Platform
 
-> Status: active development toward `1.0.0` — version `0.10.0` adds complete execution states and durable failure auditing.
+> Status: active development toward `1.0.0` — version `0.11.0` adds structured application logging and correlated operation timing.
 
 Clinical Data Platform is a synthetic clinical data engineering project that demonstrates how healthcare-like source files become auditable, analysis-ready, terminology-linked datasets.
 
@@ -9,43 +9,113 @@ The repository uses only synthetic data. It is intended for engineering review a
 ## Architecture
 
 ```text
+CLI command
+    ├── structured JSON logs to stderr
+    └── correlation_id propagated through the workflow
+            │
+            ▼
 External CSV source
-        │
-        ▼
+            │
+            ▼
 Immutable raw capture
-        ├── SHA-256 content object
-        └── append-only receipt manifest
-        │
-        ▼
+    ├── SHA-256 content object
+    └── append-only receipt manifest
+            │
+            ▼
 Versioned executable TOML contract
-        │
-        ▼
+            │
+            ▼
 Hash-chained local execution journal
-        │
-        ▼
+            │
+            ▼
 Generic validation pipeline
-        ├── valid rows
-        ├── quarantined rows
-        ├── normalized errors
-        └── quality report: validated
-        │
-        ▼
+    ├── valid rows
+    ├── quarantined rows
+    ├── normalized errors
+    └── quality report: validated
+            │
+            ▼
 Formal PostgreSQL migrations V001–V008
-        │
-        ▼
+            │
+            ▼
 Durable execution audit
-        ├── current run state
-        ├── ordered event timeline
-        └── failures retained after clinical rollback
-        │
-        ▼
+    ├── current run state
+    ├── ordered event timeline
+    └── failures retained after clinical rollback
+            │
+            ▼
 Terminology resolution and clinical persistence
-        │
-        ▼
+            │
+            ▼
 Versioned cohort SQL and feature export
 ```
 
 There is no patient-specific validation pipeline and no monolithic schema installer.
+
+## Structured application logging
+
+The console entrypoint emits operational telemetry to `stderr`. JSON is the default representation.
+
+```json
+{
+  "schema_version": "1.0.0",
+  "timestamp": "2026-07-29T12:45:01.123Z",
+  "level": "info",
+  "event": "pipeline.validation.completed",
+  "component": "pipeline",
+  "message": "Completed validate_records_against_contract.",
+  "correlation_id": "3b86c4bd-9e79-4fa9-a31a-59b31a4bb5ef",
+  "run_id": "6aa89516-f724-4dc9-b259-510abc11075a",
+  "dataset": "patients",
+  "operation": "validate_records_against_contract",
+  "stage": "validation",
+  "outcome": "success",
+  "duration_ms": 4,
+  "rows_received": 8,
+  "rows_valid": 5,
+  "rows_invalid": 3,
+  "validation_errors": 3
+}
+```
+
+Configuration:
+
+```text
+CLINICAL_DATA_LOG_LEVEL  = DEBUG | INFO | WARNING | ERROR | CRITICAL
+CLINICAL_DATA_LOG_FORMAT = json | text
+```
+
+Defaults:
+
+```text
+level  = INFO
+format = json
+output = stderr
+```
+
+PowerShell:
+
+```powershell
+$env:CLINICAL_DATA_LOG_LEVEL = "INFO"
+$env:CLINICAL_DATA_LOG_FORMAT = "json"
+clinical-data run-demo --repository-root . 2> data/clinical-data.jsonl
+```
+
+The logger records operation names, stages, outcomes, durations, aggregate counts, exception types, and PostgreSQL SQLSTATE codes. It does not intentionally log clinical rows.
+
+Defensive sanitization redacts:
+
+```text
+clinical identifiers
+rejected values and records
+credentials and tokens
+database URLs
+PostgreSQL key values and DETAIL lines
+```
+
+Structured logs are not the durable audit. They can be lost when `stderr` is not collected. `audit.pipeline_runs` and `audit.pipeline_run_events` remain authoritative for execution state and loading attempts.
+
+See [`docs/structured-logging.md`](docs/structured-logging.md).
 
 ## Complete execution lifecycle
 
@@ -229,9 +299,15 @@ migrations/
 
 Migration history is stored in `public.schema_migrations`. The engine verifies contiguous ordering, names, checksums, detected structure, pending versions, and downgrade attempts. Migrations execute transactionally under a PostgreSQL advisory lock.
 
+Logging does not require a new database migration because it is an application-output concern, not persistent schema state.
+
 ## Implemented capabilities
 
 - six contract-governed clinical datasets;
+- structured JSON logging with a versioned schema;
+- correlation IDs and context propagation through nested operations;
+- paired started/completed/failed events with durations;
+- credential and clinical-identifier redaction;
 - explicit run state machine and retry attempts;
 - hash-chained local validation journals;
 - durable PostgreSQL execution timelines and failure metadata;
@@ -285,6 +361,8 @@ python -m pip install -e ".[dev]"
 Copy-Item .env.example .env
 docker compose up -d postgres
 $env:DATABASE_URL = "postgresql://clinical_user:clinical_password@localhost:5432/clinical_data"
+$env:CLINICAL_DATA_LOG_LEVEL = "INFO"
+$env:CLINICAL_DATA_LOG_FORMAT = "json"
 
 clinical-data database-migrate
 clinical-data database-validate
@@ -311,7 +389,7 @@ pending=[]
 | Medications | 7 | 6 | 1 | 6 |
 | Procedures | 7 | 6 | 1 | 6 |
 
-The clean demo produces six completed runs with six events each, 31 normalized terminology bindings, and a hypertension cohort containing `P001` and `P002`.
+The clean demo produces six completed runs with six audit events each, 31 normalized terminology bindings, and a hypertension cohort containing `P001` and `P002`.
 
 ## Inspect execution state
 
@@ -348,16 +426,6 @@ WHERE run_id = '<run-uuid>'
 ORDER BY sequence_number;
 ```
 
-Python API:
-
-```python
-from clinical_data_platform.run_audit import (
-    get_pipeline_run,
-    list_pipeline_run_events,
-    validate_pipeline_run_audit,
-)
-```
-
 ## Quality checks
 
 ```bash
@@ -370,32 +438,33 @@ python -m pytest --cov=clinical_data_platform --cov-report=term-missing
 docker build --tag clinical-data-platform:local .
 ```
 
-CI exercises contracts, V001–V008 migrations, raw capture, local and durable audit chains, retries, failure rollback, patient history, six entities, terminology resolution, cohort generation, and container smoke tests.
+CI exercises the installed structured-logging entrypoint, contracts, V001–V008 migrations, raw capture, local and durable audit chains, retries, failure rollback, patient history, six entities, terminology resolution, cohort generation, and container smoke tests.
 
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md): system architecture and boundaries;
 - [`docs/database.md`](docs/database.md): migrations, persistence, and lineage;
 - [`docs/execution-audit.md`](docs/execution-audit.md): lifecycle, transactions, retries, and inspection;
+- [`docs/structured-logging.md`](docs/structured-logging.md): schema, configuration, redaction, event names, and queries;
 - [`docs/clinical-history-policy.md`](docs/clinical-history-policy.md): snapshot and immutable-event policy;
 - [`docs/clinical-entities.md`](docs/clinical-entities.md): six-entity model;
 - [`docs/terminology.md`](docs/terminology.md): terminology model and licensing boundary;
 - [`docs/analysis-guide.md`](docs/analysis-guide.md): review sequence and SQL;
-- [`docs/learning/execution-audit-es.md`](docs/learning/execution-audit-es.md): detailed Spanish study guide;
+- [`docs/learning/execution-audit-es.md`](docs/learning/execution-audit-es.md): Spanish execution-audit study guide;
+- [`docs/learning/structured-logging-es.md`](docs/learning/structured-logging-es.md): Spanish structured-logging study guide;
 - additional learning guides under [`docs/learning/`](docs/learning/).
 
 ## Current limitations
 
 The repository is not yet version `1.0.0`. Remaining milestones include:
 
-- structured application logging;
 - reproducible Synthea datasets;
 - bulk PostgreSQL `COPY` loading and benchmarks;
 - an additional cohort with attrition and missingness reporting;
 - coverage of at least 90%;
 - multi-version CI, security, container, and release hardening.
 
-The execution journal is tamper-evident but not administrator-resistant WORM storage. The terminology layer remains a small local subset. The project intentionally excludes identifiable patient data, production decision support, enterprise authentication, and regulatory deployment claims.
+The logging layer does not include centralized transport, OpenTelemetry, metrics, dashboards, alerts, automatic rotation, or production retention controls. The execution journal is tamper-evident but not administrator-resistant WORM storage. The terminology layer remains a small local subset. The project intentionally excludes identifiable patient data, production decision support, enterprise authentication, and regulatory deployment claims.
 
 ## License
 
