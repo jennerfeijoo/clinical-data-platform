@@ -16,6 +16,10 @@ from clinical_data_platform.database import (
 )
 from clinical_data_platform.migration import migrate_database
 
+DEFAULT_BENCHMARK_DATABASE_URL = (
+    "postgresql://clinical_user:clinical_password@localhost:5432/clinical_data"
+)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -45,8 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-destructive-reset",
         action="store_true",
         help=(
-            "Confirm that the target is an isolated disposable database whose "
-            "platform tables may be truncated between trials."
+            "Confirm that a non-default target is an isolated disposable database "
+            "whose platform tables may be truncated between trials."
         ),
     )
     return parser
@@ -55,10 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if not args.allow_destructive_reset:
+    database_url = args.database_url or database_url_from_environment()
+    if not args.allow_destructive_reset and database_url != DEFAULT_BENCHMARK_DATABASE_URL:
         parser.error(
-            "--allow-destructive-reset is required because the benchmark truncates "
-            "platform state between trials."
+            "--allow-destructive-reset is required for any database other than the "
+            "bundled local benchmark target because platform state is truncated "
+            "between trials."
         )
 
     configuration = BenchmarkConfiguration(
@@ -67,7 +73,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         warmups=args.warmups,
         seed=args.seed,
     )
-    database_url = args.database_url or database_url_from_environment()
     with connect_database(database_url) as connection:
         migrate_database(connection)
         artifacts = run_loading_benchmark(
