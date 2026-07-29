@@ -76,10 +76,12 @@ def test_committed_reference_evidence_is_internally_consistent() -> None:
     trials_path = REFERENCE_DIRECTORY / "benchmark-trials.csv"
     document = json.loads(reference_path.read_text(encoding="utf-8"))
 
-    trials_sha256 = hashlib.sha256(trials_path.read_bytes()).hexdigest()
+    committed_bytes = trials_path.read_bytes().replace(b"\r\n", b"\n")
+    source_artifact_bytes = committed_bytes.replace(b"\n", b"\r\n")
+    source_trials_sha256 = hashlib.sha256(source_artifact_bytes).hexdigest()
     assert document["schema_version"] == BENCHMARK_SCHEMA_VERSION
     assert document["evidence"]["workflow_run_id"] == "30466706538"
-    assert document["evidence"]["source_trials_sha256"] == trials_sha256
+    assert document["evidence"]["source_trials_sha256"] == source_trials_sha256
     assert document["configuration"]["patient_counts"] == [250, 1000, 2500]
     assert document["configuration"]["repetitions"] == 5
     assert all(item["copy_speedup"] > 1 for item in document["comparisons"])
