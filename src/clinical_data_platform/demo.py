@@ -1,4 +1,4 @@
-"""End-to-end demonstration workflow for the synthetic clinical dataset."""
+"""End-to-end demonstration workflow for the synthetic clinical datasets."""
 
 from __future__ import annotations
 
@@ -11,22 +11,23 @@ from clinical_data_platform.cohort import CohortSummary, build_hypertension_coho
 from clinical_data_platform.database import (
     apply_schema,
     connect_database,
-    persist_patient_validation_outputs,
+    persist_dataset_validation_outputs,
 )
-from clinical_data_platform.entity_database import persist_entity_validation_outputs
-from clinical_data_platform.entity_pipeline import run_entity_validation
-from clinical_data_platform.pipeline import run_patient_validation
+from clinical_data_platform.pipeline import run_dataset_validation
+from clinical_data_platform.registry import dataset_names
 
 
 @dataclass(frozen=True, slots=True)
 class DemoSummary:
     """Key identifiers and counts produced by the demonstration workflow."""
 
-    patient_run_id: UUID
-    encounter_run_id: UUID
-    diagnosis_run_id: UUID
-    observation_run_id: UUID
+    dataset_run_ids: dict[str, UUID]
     cohort: CohortSummary
+
+    @property
+    def patient_run_id(self) -> UUID:
+        """Return the patient run identifier for concise CLI reporting."""
+        return self.dataset_run_ids["patients"]
 
 
 def run_demo(
@@ -35,33 +36,27 @@ def run_demo(
     *,
     reference_date: date = date(2026, 7, 29),
 ) -> DemoSummary:
-    """Validate, persist, and analyze all bundled synthetic datasets."""
+    """Validate, persist, and analyze all registered bundled datasets."""
     sample_directory = repository_root / "data" / "sample"
     processed_directory = repository_root / "data" / "processed"
     analytics_directory = repository_root / "data" / "analytics"
     schema_path = repository_root / "sql" / "schema.sql"
     cohort_sql_path = repository_root / "sql" / "cohorts" / "hypertension.sql"
 
-    patient_summary = run_patient_validation(
-        sample_directory / "patients.csv",
-        processed_directory / "patients",
-        reference_date=reference_date,
-    )
-    entity_summaries = {
-        dataset: run_entity_validation(
+    validation_summaries = {
+        dataset: run_dataset_validation(
             dataset,
             sample_directory / f"{dataset}.csv",
             processed_directory / dataset,
             reference_date=reference_date,
         )
-        for dataset in ("encounters", "diagnoses", "observations")
+        for dataset in dataset_names()
     }
 
     with connect_database(database_url) as connection:
         apply_schema(connection, schema_path)
-        persist_patient_validation_outputs(connection, processed_directory / "patients")
-        for dataset in ("encounters", "diagnoses", "observations"):
-            persist_entity_validation_outputs(
+        for dataset in dataset_names():
+            persist_dataset_validation_outputs(
                 connection,
                 dataset,
                 processed_directory / dataset,
@@ -73,9 +68,8 @@ def run_demo(
         )
 
     return DemoSummary(
-        patient_run_id=patient_summary.run_id,
-        encounter_run_id=entity_summaries["encounters"].run_id,
-        diagnosis_run_id=entity_summaries["diagnoses"].run_id,
-        observation_run_id=entity_summaries["observations"].run_id,
+        dataset_run_ids={
+            dataset: summary.run_id for dataset, summary in validation_summaries.items()
+        },
         cohort=cohort_summary,
     )
