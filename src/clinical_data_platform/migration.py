@@ -242,6 +242,19 @@ def _detect_existing_schema_version(connection: psycopg.Connection[Any]) -> int:
                 "The database contains partial raw-lineage columns and cannot be baselined."
             )
         version = 4
+
+    history_table_present = _table_exists(connection, "clinical.patient_history")
+    hash_presence = tuple(
+        _column_exists(connection, "clinical", table_name, "record_sha256")
+        for table_name in ("patients", "encounters", "diagnoses", "observations")
+    )
+    if history_table_present or any(hash_presence):
+        if not history_table_present or not all(hash_presence) or version < 4:
+            raise MigrationHistoryError(
+                "The database contains a partial clinical-history schema and cannot be baselined."
+            )
+        version = 5
+
     return version
 
 
@@ -466,7 +479,10 @@ def migrate_database(
             if previous_version < migration.version <= effective_target:
                 started = time.perf_counter()
                 connection.execute(migration.sql, prepare=False)
-                execution_ms = max(0, round((time.perf_counter() - started) * 1000))
+                execution_ms = max(
+                    0,
+                    round((time.perf_counter() - started) * 1000),
+                )
                 _insert_history(
                     connection,
                     migration,
