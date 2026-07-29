@@ -72,16 +72,6 @@ def connect_database(database_url: str) -> psycopg.Connection[Any]:
     return psycopg.connect(database_url)
 
 
-def apply_schema(connection: psycopg.Connection[Any], schema_path: Path) -> None:
-    """Create the clinical, audit, and analytics database objects when absent."""
-    if not schema_path.exists():
-        raise FileNotFoundError(f"Schema file not found: {schema_path}")
-
-    schema_sql = schema_path.read_text(encoding="utf-8")
-    connection.execute(schema_sql, prepare=False)
-    connection.commit()
-
-
 def _read_quality_report(path: Path) -> QualityReport:
     if not path.exists():
         raise FileNotFoundError(f"Quality report not found: {path}")
