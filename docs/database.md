@@ -9,8 +9,14 @@ raw.py
 migration.py
     → creates and upgrades database structure
 
+history.py
+    → declares clinical history semantics
+
 database.py
     → verifies lineage and persists validated outputs
+
+PostgreSQL triggers
+    → enforce SCD2 and immutable-event rules
 ```
 
 Dataset loading code does not create tables, and raw storage code does not write clinical rows.
@@ -22,7 +28,8 @@ src/clinical_data_platform/migrations/
 ├── V001__create_core_clinical_schema.sql
 ├── V002__add_longitudinal_entities_and_cohorts.sql
 ├── V003__add_contract_lineage.sql
-└── V004__add_raw_landing_lineage.sql
+├── V004__add_raw_landing_lineage.sql
+└── V005__add_clinical_history_policy.sql
 ```
 
 `public.schema_migrations` records version, name, checksum, timestamp, execution time, execution type, and application version.
@@ -31,53 +38,85 @@ Applied migrations are immutable. Schema corrections are introduced through a ne
 
 ## V004 raw lineage
 
-V004 adds these fields to `audit.pipeline_runs`:
+V004 adds receipt and content-object fields to `audit.pipeline_runs`. `source_sha256` remains the hash of the captured raw object. Older rows receive explicit `legacy/unmanaged` markers rather than fabricated receipts.
+
+## V005 clinical history
+
+V005 introduces an explicit hybrid policy.
+
+### Patient snapshots
 
 ```text
-raw_receipt_id
-raw_received_at
-raw_storage_version
-raw_manifest_path
-raw_manifest_sha256
-raw_object_path
-raw_size_bytes
+clinical.patients
+    → current accepted snapshot
+
+clinical.patient_history
+    → SCD Type 2 history
 ```
 
-`source_sha256` remains the hash of the captured raw object. The new fields identify the receipt event and physical content address.
-
-Rows created before V004 receive explicit legacy values:
+`clinical.patient_history` stores:
 
 ```text
-raw_receipt_id = zero UUID
-raw_storage_version = legacy/unmanaged
-raw_manifest_path = legacy/unmanaged
-raw_manifest_sha256 = 64 zeros
-raw_object_path = legacy/unmanaged
-raw_size_bytes = 0
+patient_version_id
+patient_id
+demographic attributes
+record_sha256
+valid_from_run_id
+valid_to_run_id
+source_sha256
+valid_from
+valid_to
+is_current
 ```
 
-The migration does not fabricate a historical receipt that never existed.
+A partial unique index guarantees at most one `is_current = true` version per patient.
+
+### Immutable events
+
+These tables are append-only by identity:
+
+```text
+clinical.encounters
+clinical.diagnoses
+clinical.observations
+```
+
+An exact duplicate preserves the original row and original `source_run_id`. Reusing the same event identifier with different normalized content raises an integrity error and rolls back the complete load transaction.
+
+### Record hashes
+
+Every clinical current table has `record_sha256`. PostgreSQL calculates the hash from normalized business content through functions installed by V005.
+
+The hash excludes:
+
+```text
+source_run_id
+source_sha256
+loaded_at
+```
+
+Those fields describe lineage, not clinical meaning. Event timestamps are converted to UTC before hashing.
 
 ## Fresh install and upgrade
 
 Fresh installation:
 
 ```text
-0 → V001 → V002 → V003 → V004
+0 → V001 → V002 → V003 → V004 → V005
 ```
 
-Upgrade test:
+Upgrade from the previous milestone:
 
 ```powershell
-clinical-data database-migrate --target-version 3
+clinical-data database-migrate --target-version 4
 clinical-data database-status
 clinical-data database-migrate
 clinical-data database-validate
 ```
 
-The expected pending version at the intermediate state is V004.
+At V004, `clinical.patient_history` and clinical `record_sha256` columns do not exist. V005 backfills hashes for existing rows, creates one current history row per existing patient, and installs enforcement triggers.
 
-Recognized complete unmanaged schemas may be adopted only through explicit baseline. Partial structures are rejected.
+Recognized complete unmanaged schemas may be adopted only through explicit baseline. Partial V005 structures are rejected.
 
 ## Migration guarantees
 
@@ -91,7 +130,8 @@ The engine checks:
 - detected structure versus recorded version;
 - no downgrade;
 - advisory-lock serialization;
-- transactionally coupled DDL and history rows.
+- transactionally coupled DDL and history rows;
+- complete V005 table and hash-column signatures.
 
 ## Dataset persistence API
 
@@ -108,7 +148,7 @@ persist_dataset_validation_outputs(
 
 ## Pre-transaction verification
 
-Before opening the database write transaction, `database.py` validates four groups.
+Before opening the database write transaction, `database.py` validates:
 
 ### Output bundle
 
@@ -141,35 +181,103 @@ Before opening the database write transaction, `database.py` validates four grou
 
 Any inconsistency prevents the database transaction from starting.
 
-## Persisted lineage
+## Transaction behavior
 
-A normal `audit.pipeline_runs` row links:
-
-```text
-run_id
-├── external source_path
-├── raw receipt UUID and timestamp
-├── raw receipt path and SHA-256
-├── raw object path, SHA-256, and size
-├── contract path, version, and SHA-256
-├── reference date
-├── quality counts
-└── execution timestamps
-```
-
-Each clinical row retains:
+One validated run writes in one transaction:
 
 ```text
-source_run_id
-source_sha256
-loaded_at
+pipeline run metadata
++
+valid clinical rows
++
+validation errors
++
+history transitions or immutable-event checks
 ```
 
-The join through `source_run_id` exposes the complete raw and contract lineage.
+All commit or all roll back.
+
+The raw object and receipt exist before this transaction. A database rollback does not delete them; source capture is an earlier durable stage.
+
+## Patient transaction examples
+
+### New patient
+
+```text
+insert current snapshot
+→ calculate record hash
+→ insert current history version
+→ commit
+```
+
+### Identical snapshot
+
+```text
+upsert patient
+→ same business hash
+→ refresh current snapshot lineage
+→ no new history version
+```
+
+The current history version identifies the run that established that business state. The current table may identify a later run that reconfirmed it.
+
+### Changed snapshot
+
+```text
+upsert patient
+→ new business hash
+→ close old history version
+→ insert new current version
+→ update current snapshot
+```
+
+`valid_to_run_id` and the new `valid_from_run_id` both identify the transition-producing run.
+
+## Immutable-event transaction examples
+
+### Exact duplicate
+
+```text
+same event ID
++ same record hash
+→ trigger returns OLD
+→ original event and lineage remain unchanged
+```
+
+The new pipeline run is still auditable as a receipt and validation event, even though the clinical event is not rewritten.
+
+### Conflicting identity
+
+```text
+same event ID
++ different record hash
+→ PostgreSQL integrity error
+→ audit.pipeline_runs insertion rolls back
+→ event remains unchanged
+```
+
+## Idempotency layers
+
+```text
+raw object deduplication
+    keyed by source SHA-256
+
+receipt append-only behavior
+    one UUID per reception
+
+run-level database idempotency
+    keyed by run_id
+
+patient history idempotency
+    keyed by business record hash transition
+
+immutable-event idempotency
+    keyed by event identity + matching content hash
+```
 
 ## Query examples
 
-Inspect current migration history:
+Migration history:
 
 ```sql
 SELECT
@@ -183,76 +291,61 @@ FROM public.schema_migrations
 ORDER BY version;
 ```
 
-Inspect raw lineage:
+Current patients:
 
 ```sql
 SELECT
-    dataset_name,
-    run_id,
-    raw_receipt_id,
-    raw_received_at,
-    raw_storage_version,
-    raw_manifest_path,
-    raw_manifest_sha256,
-    raw_object_path,
-    raw_size_bytes,
-    source_sha256
-FROM audit.pipeline_runs
-ORDER BY loaded_at;
+    patient_id,
+    sex_at_birth,
+    birth_date,
+    death_date,
+    record_sha256,
+    source_run_id
+FROM clinical.patients
+ORDER BY patient_id;
 ```
 
-Find repeated content receipts:
+Patient versions:
 
 ```sql
 SELECT
-    dataset_name,
-    source_sha256,
-    COUNT(*) AS run_count,
-    COUNT(DISTINCT raw_receipt_id) AS receipt_count
-FROM audit.pipeline_runs
-GROUP BY dataset_name, source_sha256
-HAVING COUNT(*) > 1;
+    patient_id,
+    sex_at_birth,
+    death_date,
+    record_sha256,
+    valid_from_run_id,
+    valid_to_run_id,
+    valid_from,
+    valid_to,
+    is_current
+FROM clinical.patient_history
+ORDER BY patient_id, patient_version_id;
 ```
 
-## Transaction behavior
+Current-version invariant:
 
-One validated run writes in one transaction:
-
-```text
-pipeline run metadata
-+
-valid clinical rows
-+
-validation errors
+```sql
+SELECT patient_id, COUNT(*)
+FROM clinical.patient_history
+WHERE is_current
+GROUP BY patient_id
+HAVING COUNT(*) <> 1;
 ```
 
-All commit or all roll back.
+Expected result: zero rows.
 
-The raw object and receipt exist before this transaction. A database rollback does not delete them; source capture is an earlier durable stage.
+Event lineage:
 
-## Idempotency and deduplication
-
-These are distinct:
-
-```text
-raw object deduplication
-    keyed by source SHA-256
-
-receipt append-only behavior
-    one UUID per reception
-
-run-level database idempotency
-    keyed by run_id
-
-clinical snapshot upsert
-    keyed by clinical entity identifier
+```sql
+SELECT
+    encounter_id,
+    patient_id,
+    record_sha256,
+    source_run_id,
+    loaded_at
+FROM clinical.encounters
+ORDER BY encounter_id;
 ```
-
-Identical bytes may produce several receipts and several validation runs while still occupying one raw object.
-
-## Current snapshot boundary
-
-Clinical entity tables still represent the latest snapshot through upserts. Raw storage preserves every source receipt, but it does not yet provide SCD Type 2 history for transformed clinical records. Historical record versioning is the next separate milestone.
 
 ## Operational commands
 
@@ -265,6 +358,6 @@ clinical-data database-validate
 clinical-data load-dataset
 ```
 
-## Limitations
+## Limits
 
-The local filesystem implementation does not provide certified WORM retention, replication, cloud IAM, encryption policy, or administrator-resistant immutability. Those controls belong to a production object-storage deployment, not to PostgreSQL lineage alone.
+The current policy is not a complete clinical correction model. It does not implement tombstones, event supersession, patient identity merge/split, or separate clinical valid time and system time. Those semantics must be designed explicitly rather than inferred from generic updates.
