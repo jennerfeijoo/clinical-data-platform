@@ -14,6 +14,7 @@ import psycopg
 
 from clinical_data_platform.contract import load_contract_by_resource
 from clinical_data_platform.ingestion import read_csv_records
+from clinical_data_platform.raw import RAW_STORAGE_VERSION, verify_raw_receipt
 from clinical_data_platform.registry import get_dataset_definition
 
 
@@ -33,6 +34,13 @@ class QualityReport(TypedDict):
     generated_at: str
     input_path: str
     input_sha256: str
+    raw_storage_version: str
+    raw_receipt_id: str
+    raw_received_at: str
+    raw_manifest_path: str
+    raw_manifest_sha256: str
+    raw_object_path: str
+    raw_size_bytes: int
     contract_path: str
     contract_version: str
     contract_sha256: str
@@ -88,6 +96,12 @@ def _read_quality_report(path: Path) -> QualityReport:
         "generated_at",
         "input_path",
         "input_sha256",
+        "raw_storage_version",
+        "raw_receipt_id",
+        "raw_received_at",
+        "raw_manifest_path",
+        "raw_manifest_sha256",
+        "raw_object_path",
         "contract_path",
         "contract_version",
         "contract_sha256",
@@ -95,6 +109,7 @@ def _read_quality_report(path: Path) -> QualityReport:
         "status",
     )
     integer_fields = (
+        "raw_size_bytes",
         "rows_received",
         "rows_valid",
         "rows_invalid",
@@ -118,6 +133,13 @@ def _read_quality_report(path: Path) -> QualityReport:
         generated_at=raw["generated_at"],
         input_path=raw["input_path"],
         input_sha256=raw["input_sha256"],
+        raw_storage_version=raw["raw_storage_version"],
+        raw_receipt_id=raw["raw_receipt_id"],
+        raw_received_at=raw["raw_received_at"],
+        raw_manifest_path=raw["raw_manifest_path"],
+        raw_manifest_sha256=raw["raw_manifest_sha256"],
+        raw_object_path=raw["raw_object_path"],
+        raw_size_bytes=raw["raw_size_bytes"],
         contract_path=raw["contract_path"],
         contract_version=raw["contract_version"],
         contract_sha256=raw["contract_sha256"],
@@ -158,12 +180,41 @@ def _validate_contract_lineage(report: QualityReport, dataset: str) -> None:
         raise PersistenceError("contract_sha256 does not match the referenced contract bytes.")
 
 
+def _validate_raw_lineage(report: QualityReport, dataset: str, raw_root: Path) -> None:
+    if report["raw_storage_version"] != RAW_STORAGE_VERSION:
+        raise PersistenceError("raw_storage_version is not supported by this application.")
+
+    try:
+        receipt = verify_raw_receipt(raw_root, report["raw_manifest_path"])
+        reported_receipt_id = UUID(report["raw_receipt_id"])
+        reported_received_at = datetime.fromisoformat(report["raw_received_at"])
+    except (ValueError, RuntimeError) as exc:
+        raise PersistenceError("Raw landing lineage could not be verified.") from exc
+
+    if receipt.dataset != dataset:
+        raise PersistenceError("Raw receipt dataset does not match the requested dataset.")
+    if receipt.receipt_id != reported_receipt_id:
+        raise PersistenceError("raw_receipt_id does not match the immutable receipt.")
+    if receipt.received_at != reported_received_at:
+        raise PersistenceError("raw_received_at does not match the immutable receipt.")
+    if receipt.manifest_sha256 != report["raw_manifest_sha256"]:
+        raise PersistenceError("raw_manifest_sha256 does not match the receipt bytes.")
+    if receipt.object_relative_path != report["raw_object_path"]:
+        raise PersistenceError("raw_object_path does not match the immutable receipt.")
+    if receipt.size_bytes != report["raw_size_bytes"]:
+        raise PersistenceError("raw_size_bytes does not match the immutable object.")
+    if receipt.sha256 != report["input_sha256"]:
+        raise PersistenceError("input_sha256 does not match the immutable raw object.")
+
+
 def persist_dataset_validation_outputs(
     connection: psycopg.Connection[Any],
     dataset: str,
     output_directory: Path,
+    *,
+    raw_root: Path,
 ) -> DatasetPersistenceSummary:
-    """Load one registered dataset and its complete contract lineage transactionally."""
+    """Load a dataset after verifying output, contract, and raw-object lineage."""
     definition = get_dataset_definition(dataset)
     report = _read_quality_report(output_directory / "quality_report.json")
     valid_records = read_csv_records(output_directory / f"valid_{dataset}.csv")
@@ -179,13 +230,18 @@ def persist_dataset_validation_outputs(
         raise PersistenceError("Only completed validation runs can be persisted.")
     if len(report["input_sha256"]) != 64:
         raise PersistenceError("input_sha256 must contain 64 hexadecimal characters.")
+    if len(report["raw_manifest_sha256"]) != 64:
+        raise PersistenceError("raw_manifest_sha256 must contain 64 hexadecimal characters.")
     if len(report["contract_sha256"]) != 64:
         raise PersistenceError("contract_sha256 must contain 64 hexadecimal characters.")
     _validate_contract_lineage(report, dataset)
+    _validate_raw_lineage(report, dataset, raw_root)
 
     try:
         run_id = UUID(report["run_id"])
+        raw_receipt_id = UUID(report["raw_receipt_id"])
         generated_at = datetime.fromisoformat(report["generated_at"])
+        raw_received_at = datetime.fromisoformat(report["raw_received_at"])
         reference_date = date.fromisoformat(report["reference_date"])
     except ValueError as exc:
         raise PersistenceError("The quality report contains an invalid UUID or date.") from exc
@@ -214,11 +270,15 @@ def persist_dataset_validation_outputs(
             """
             INSERT INTO audit.pipeline_runs (
                 run_id, dataset_name, source_path, source_sha256,
+                raw_receipt_id, raw_received_at, raw_storage_version,
+                raw_manifest_path, raw_manifest_sha256,
+                raw_object_path, raw_size_bytes,
                 contract_path, contract_version, contract_sha256,
                 reference_date, rows_received, rows_valid, rows_invalid,
                 validation_errors, status, generated_at
             )
             VALUES (
+                %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s
             )
@@ -229,6 +289,13 @@ def persist_dataset_validation_outputs(
                 dataset,
                 report["input_path"],
                 report["input_sha256"],
+                raw_receipt_id,
+                raw_received_at,
+                report["raw_storage_version"],
+                report["raw_manifest_path"],
+                report["raw_manifest_sha256"],
+                report["raw_object_path"],
+                report["raw_size_bytes"],
                 report["contract_path"],
                 report["contract_version"],
                 report["contract_sha256"],
