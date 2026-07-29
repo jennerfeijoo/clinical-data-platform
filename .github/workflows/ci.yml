@@ -52,6 +52,14 @@ jobs:
           clinical-data validate-contracts > "$RUNNER_TEMP/contracts.txt" 2> "$LOG_FILE"
           python -c "import json, pathlib, sys; docs=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line]; assert docs; assert all(d['schema_version']=='1.0.0' for d in docs); assert docs[0]['event']=='cli.command.started'; assert docs[-1]['event']=='cli.command.completed'; assert len({d['correlation_id'] for d in docs})==1" "$LOG_FILE"
 
+      - name: Exercise reproducible Synthea adapter
+        run: |
+          NORMALIZED="$RUNNER_TEMP/synthea-normalized"
+          clinical-data synthea-profile > "$RUNNER_TEMP/synthea-profile.json"
+          clinical-data synthea-adapt tests/fixtures/synthea/csv --output-dir "$NORMALIZED"
+          clinical-data synthea-verify "$NORMALIZED"
+          python -c "import json, pathlib, sys; d=json.loads(pathlib.Path(sys.argv[1]).read_text()); assert d['upstream']['ref']=='v4.0.0'; assert d['generation']['random_seed']==20260729; assert d['generation']['thread_pool_size']==1" "$RUNNER_TEMP/synthea-profile.json"
+
       - name: Validate packaged contracts
         run: clinical-data validate-contracts
 
@@ -86,6 +94,9 @@ jobs:
 
       - name: Smoke-test container contracts
         run: docker run --rm clinical-data-platform:ci validate-contracts
+
+      - name: Smoke-test container Synthea profile
+        run: docker run --rm clinical-data-platform:ci synthea-profile
 
       - name: Smoke-test packaged container migrations
         run: >-
