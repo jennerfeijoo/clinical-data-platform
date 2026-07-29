@@ -4,15 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clinical-data-platform"
-version = "0.17.0"
-description = "An auditable synthetic clinical data platform with mandatory behavioral test coverage, reproducible cohort quality reports, governed PostgreSQL loading, terminology normalization, and immutable lineage."
+version = "0.18.0"
+description = "An auditable synthetic clinical data platform with multi-version Python CI, mandatory behavioral test coverage, reproducible cohort quality reports, governed PostgreSQL loading, terminology normalization, and immutable lineage."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.15"
 license = "MIT"
 authors = [
     { name = "Jenner Feijoo" }
 ]
 keywords = ["clinical-data", "data-engineering", "healthcare", "postgresql", "synthea"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
 dependencies = [
     "psycopg[binary]>=3.2,<4"
 ]
