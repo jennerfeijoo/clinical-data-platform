@@ -10,12 +10,16 @@ def test_registry_contains_every_active_contract() -> None:
         "encounters",
         "diagnoses",
         "observations",
+        "medications",
+        "procedures",
     )
 
     assert dataset_names() == expected
     assert contract_names() == expected
     assert get_dataset_definition("patients").id_column == "patient_id"
     assert get_dataset_definition("observations").id_column == "observation_id"
+    assert get_dataset_definition("medications").id_column == "medication_id"
+    assert get_dataset_definition("procedures").id_column == "procedure_id"
 
 
 def test_registry_uses_contract_columns_as_source_of_truth() -> None:
@@ -29,4 +33,4 @@ def test_registry_uses_contract_columns_as_source_of_truth() -> None:
 
 def test_registry_reports_unknown_dataset() -> None:
     with pytest.raises(ValueError, match="Unsupported dataset"):
-        get_dataset_definition("medications")
+        get_dataset_definition("allergies")
