@@ -1,10 +1,39 @@
 # Clinical Data Platform
 
-> Status: portfolio MVP complete — synthetic clinical data can be validated, persisted, traced, transformed into a reproducible cohort, and exported for analysis.
+> Status: active development toward `1.0.0` — the validation and persistence architecture is now dataset-generic.
 
-Clinical Data Platform is a compact clinical data engineering project that demonstrates the path from raw healthcare-like records to an auditable analysis-ready dataset.
+Clinical Data Platform is a synthetic clinical data engineering project that demonstrates the path from raw healthcare-like records to an auditable analysis-ready dataset.
 
-The repository uses only synthetic data. It is designed for engineering review and learning, not for identifiable patient data, clinical decision-making, or production healthcare use.
+The repository uses only synthetic data. It is intended for engineering review and learning, not for identifiable patient data, clinical decision-making, or production healthcare use.
+
+## Current architectural milestone
+
+The original implementation had one pipeline for patients and a second pipeline for encounters, diagnoses, and observations. That duplication has been removed.
+
+All datasets now use the same two operations:
+
+```python
+run_dataset_validation(...)
+persist_dataset_validation_outputs(...)
+```
+
+Dataset-specific behavior is registered through `DatasetDefinition` objects.
+
+```text
+Dataset registry
+    ├── patients
+    ├── encounters
+    ├── diagnoses
+    └── observations
+          │
+          ▼
+Generic validation pipeline
+          │
+          ▼
+Generic PostgreSQL persistence
+```
+
+There is no patient-specific pipeline or persistence path.
 
 ## What the project does
 
@@ -12,11 +41,14 @@ The repository uses only synthetic data. It is designed for engineering review a
 Synthetic CSV files
         │
         ▼
+Dataset registry lookup
+        │
+        ▼
 Schema and clinical validation
         │
         ├── valid rows
         ├── quarantined rows
-        ├── structured errors
+        ├── normalized errors
         └── quality reports
         │
         ▼
@@ -34,7 +66,10 @@ Analysis-ready feature table + metadata
 
 ## Implemented capabilities
 
-- Python package and command-line interface;
+- generic dataset registry;
+- one validation pipeline for all registered datasets;
+- one persistence workflow for all registered datasets;
+- normalized cross-dataset validation errors;
 - synthetic patients, encounters, diagnoses, and observations;
 - documented data contracts;
 - UTF-8 CSV ingestion;
@@ -56,7 +91,26 @@ Analysis-ready feature table + metadata
 - PowerShell and POSIX demo scripts;
 - Ruff, mypy, pytest, coverage, PostgreSQL integration tests, and GitHub Actions.
 
-## Fastest way to run the complete MVP
+## Generic dataset definition
+
+Every supported dataset is represented by a `DatasetDefinition`:
+
+```python
+DatasetDefinition(
+    name="patients",
+    columns=(...),
+    id_column="patient_id",
+    validator=...,
+    row_builder=...,
+    upsert_sql=...,
+)
+```
+
+The generic pipeline does not know patient-specific columns or clinical rules. It retrieves that behavior from the registry.
+
+The extension test in `tests/test_registry.py` registers a temporary `labs` dataset and runs it through the existing pipeline without modifying `pipeline.py`.
+
+## Fastest way to run the complete workflow
 
 Requirements:
 
@@ -97,8 +151,6 @@ docker compose down -v
 
 ## Expected bundled-sample result
 
-Validated rows:
-
 | Dataset | Received | Valid | Invalid | Errors |
 |---|---:|---:|---:|---:|
 | Patients | 8 | 5 | 3 | 3 |
@@ -134,36 +186,6 @@ data/analytics/
 └── hypertension_cohort_metadata.json
 ```
 
-The metadata file records the cohort run UUID, definition version, parameters, source run UUIDs, generation time, and row count.
-
-## PostgreSQL model
-
-### Clinical schema
-
-```text
-clinical.patients
-clinical.encounters
-clinical.diagnoses
-clinical.observations
-```
-
-### Audit schema
-
-```text
-audit.pipeline_runs
-audit.validation_errors
-audit.cohort_runs
-audit.cohort_source_runs
-```
-
-### Analytics schema
-
-```text
-analytics.hypertension_features
-```
-
-The database preserves the source run and source checksum for every persisted clinical record. Cohort runs reference the latest successful run for each required source dataset.
-
 ## Local Python development
 
 Create and activate a virtual environment:
@@ -191,28 +213,34 @@ clinical-data run-demo --repository-root .
 ## Main CLI commands
 
 ```text
-clinical-data validate-patients
-clinical-data load-patients
-clinical-data validate-entity
-clinical-data load-entity
+clinical-data validate-dataset
+clinical-data load-dataset
 clinical-data build-hypertension-cohort
 clinical-data run-demo
 ```
 
-Example entity validation:
+Validate patients through the generic command:
 
 ```powershell
-clinical-data validate-entity observations data/sample/observations.csv `
+clinical-data validate-dataset patients data/sample/patients.csv `
+  --output-dir data/processed/patients `
+  --reference-date 2026-07-29
+```
+
+Validate observations through the same command:
+
+```powershell
+clinical-data validate-dataset observations data/sample/observations.csv `
   --output-dir data/processed/observations `
   --reference-date 2026-07-29
 ```
 
-Example cohort build after loading all source datasets:
+Load any validated dataset:
 
 ```powershell
-clinical-data build-hypertension-cohort `
-  --sql sql/cohorts/hypertension.sql `
-  --output-dir data/analytics
+clinical-data load-dataset patients `
+  --output-dir data/processed/patients `
+  --schema sql/schema.sql
 ```
 
 ## Quality checks
@@ -232,31 +260,25 @@ Integration tests use PostgreSQL and are executed automatically in GitHub Action
 clinical-data-platform/
 ├── .github/workflows/ci.yml
 ├── data/sample/
-│   ├── patients.csv
-│   ├── encounters.csv
-│   ├── diagnoses.csv
-│   └── observations.csv
 ├── docs/
 │   ├── architecture.md
 │   ├── analysis-guide.md
 │   ├── database.md
 │   ├── hypertension-cohort.md
+│   ├── learning/
+│   │   └── generic-dataset-architecture-es.md
 │   └── data-contracts/
 ├── scripts/
-│   ├── run_demo.ps1
-│   └── run_demo.sh
 ├── sql/
-│   ├── schema.sql
-│   └── cohorts/hypertension.sql
 ├── src/clinical_data_platform/
 │   ├── clinical_entities.py
 │   ├── cohort.py
 │   ├── database.py
 │   ├── demo.py
-│   ├── entity_database.py
-│   ├── entity_pipeline.py
 │   ├── ingestion.py
+│   ├── models.py
 │   ├── pipeline.py
+│   ├── registry.py
 │   └── validation.py
 ├── tests/
 ├── Dockerfile
@@ -267,27 +289,26 @@ clinical-data-platform/
 
 ## Documentation
 
-- [`docs/architecture.md`](docs/architecture.md): system layers and design boundaries;
-- [`docs/analysis-guide.md`](docs/analysis-guide.md): recommended technical review and SQL queries;
+- [`docs/architecture.md`](docs/architecture.md): generic system architecture and design trade-offs;
+- [`docs/learning/generic-dataset-architecture-es.md`](docs/learning/generic-dataset-architecture-es.md): Spanish study guide, interview explanations, and exercises;
+- [`docs/analysis-guide.md`](docs/analysis-guide.md): technical review sequence and SQL queries;
 - [`docs/database.md`](docs/database.md): persistence and idempotency;
 - [`docs/hypertension-cohort.md`](docs/hypertension-cohort.md): cohort definition and variables;
 - [`docs/data-contracts/`](docs/data-contracts/): source schemas and validation rules.
 
-## Deliberate limitations
+## Current limitations
 
-The MVP does not claim production clinical readiness. It does not include:
+The repository is not yet version `1.0.0`. The next architectural steps include:
 
-- identifiable patient data;
-- authentication or authorization;
-- encryption key management;
-- FHIR interfaces;
-- external terminology services;
-- workflow orchestration platforms;
-- schema-migration tooling;
-- production monitoring and alerting;
-- a general-purpose cohort-definition language.
+- declarative and versioned data contracts;
+- schema migration tooling;
+- immutable raw-data storage;
+- large-scale loading and benchmarks;
+- expanded entities and terminology normalization;
+- stronger operational observability;
+- additional cohort definitions and attrition reporting.
 
-These constraints keep the repository small enough to review while still demonstrating ingestion, data quality, SQL, relational modeling, containers, testing, lineage, cohort derivation, and feature engineering.
+It also intentionally excludes identifiable patient data, production clinical decision support, enterprise authentication, and regulatory deployment claims.
 
 ## License
 
