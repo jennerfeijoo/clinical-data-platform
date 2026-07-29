@@ -45,6 +45,11 @@ class DatasetPipelineSummary:
     contract_version: str
     contract_sha256: str
     source_sha256: str
+    raw_receipt_id: UUID
+    raw_manifest_relative_path: str
+    raw_manifest_sha256: str
+    raw_object_relative_path: str
+    raw_size_bytes: int
     rows_received: int
     rows_valid: int
     rows_invalid: int
