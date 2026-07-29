@@ -12,6 +12,7 @@ from clinical_data_platform.migration import migrate_database
 from clinical_data_platform.pipeline import run_dataset_validation
 from clinical_data_platform.raw import verify_raw_receipt
 from clinical_data_platform.registry import dataset_names
+from clinical_data_platform.run_audit import validate_pipeline_run_audit
 from clinical_data_platform.terminology import validate_terminology_bindings
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -52,6 +53,10 @@ def test_full_clinical_pipeline_builds_expected_hypertension_features(
         )
         for dataset in dataset_names()
     }
+    audits = {
+        dataset: validate_pipeline_run_audit(connection, summary.run_id)
+        for dataset, summary in summaries.items()
+    }
     terminology = validate_terminology_bindings(connection)
     cohort = build_hypertension_cohort(
         connection,
@@ -88,6 +93,9 @@ def test_full_clinical_pipeline_builds_expected_hypertension_features(
     assert loads["observations"].records_upserted == 13
     assert loads["medications"].records_upserted == 6
     assert loads["procedures"].records_upserted == 6
+    assert all(load.final_status == "completed" for load in loads.values())
+    assert all(audit.current_status == "completed" for audit in audits.values())
+    assert all(audit.event_count == 6 for audit in audits.values())
     assert terminology.normalized_clinical_rows == 31
     assert terminology.invalid_bindings == 0
     assert systolic_concept == ("LOINC", "8480-6")
@@ -96,6 +104,16 @@ def test_full_clinical_pipeline_builds_expected_hypertension_features(
         ("P001", 146.0, 92.0, 95),
         ("P002", 151.0, 96.0, 37),
     ]
+
+    execution_counts = connection.execute(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'completed'),
+            SUM(audit_event_count)
+        FROM audit.pipeline_runs
+        """
+    ).fetchone()
+    assert execution_counts == (6, 36)
 
     entity_counts = connection.execute(
         """
