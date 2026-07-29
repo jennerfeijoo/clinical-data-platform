@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clinical-data-platform"
-version = "0.10.0"
-description = "An auditable clinical data platform with explicit execution lifecycles, durable failures, terminology normalization, and immutable lineage."
+version = "0.11.0"
+description = "An auditable clinical data platform with structured observability, explicit execution lifecycles, terminology normalization, and immutable lineage."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [
     { name = "Jenner Feijoo" }
 ]
-keywords = ["clinical-data", "data-engineering", "healthcare", "postgresql", "audit"]
+keywords = ["clinical-data", "data-engineering", "healthcare", "postgresql", "observability"]
 dependencies = [
     "psycopg[binary]>=3.2,<4"
 ]
@@ -21,7 +21,7 @@ dependencies = [
 Repository = "https://github.com/jennerfeijoo/clinical-data-platform"
 
 [project.scripts]
-clinical-data = "clinical_data_platform.cli:main"
+clinical-data = "clinical_data_platform.entrypoint:main"
 
 [project.optional-dependencies]
 dev = [
