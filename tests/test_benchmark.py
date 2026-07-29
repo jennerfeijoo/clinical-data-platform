@@ -13,11 +13,7 @@ from clinical_data_platform.benchmark import (
     generate_benchmark_workload,
     run_loading_benchmark,
 )
-from clinical_data_platform.benchmark_cli import (
-    assert_isolated_empty_benchmark_database,
-    build_parser,
-    main,
-)
+from clinical_data_platform.benchmark_cli import build_parser, main
 from clinical_data_platform.migration import migrate_database
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -29,11 +25,14 @@ REFERENCE_DIRECTORY = (
 )
 
 
-def test_benchmark_configuration_requires_increasing_unique_sizes() -> None:
+def test_benchmark_configuration_requires_valid_balanced_protocol() -> None:
     with pytest.raises(ValueError, match="unique and increasing"):
         BenchmarkConfiguration(patient_counts=(100, 50), repetitions=2, warmups=0)
     with pytest.raises(ValueError, match="positive"):
         BenchmarkConfiguration(patient_counts=(0,), repetitions=2, warmups=0)
+    with pytest.raises(ValueError, match="positive even integer"):
+        BenchmarkConfiguration(patient_counts=(100,), repetitions=3, warmups=0)
+    assert BenchmarkConfiguration().repetitions == 6
 
 
 def test_benchmark_workload_is_deterministic_and_has_expected_ratios() -> None:
@@ -143,7 +142,8 @@ def test_committed_reference_evidence_is_internally_consistent() -> None:
 
 
 @pytest.mark.integration
-def test_benchmark_refuses_populated_governed_database(
+def test_benchmark_core_refuses_populated_governed_database_without_deleting_rows(
+    tmp_path: Path,
     clean_database_connection: psycopg.Connection[Any],
 ) -> None:
     connection = clean_database_connection
@@ -153,7 +153,21 @@ def test_benchmark_refuses_populated_governed_database(
         connection.execute("INSERT INTO analytics.benchmark_guard_fixture VALUES (1)")
 
     with pytest.raises(RuntimeError, match="Benchmark target is not empty"):
-        assert_isolated_empty_benchmark_database(connection)
+        run_loading_benchmark(
+            connection,
+            tmp_path / "blocked-benchmark",
+            configuration=BenchmarkConfiguration(
+                patient_counts=(1,),
+                repetitions=2,
+                warmups=0,
+            ),
+        )
+
+    remaining = connection.execute(
+        "SELECT COUNT(*) FROM analytics.benchmark_guard_fixture"
+    ).fetchone()
+    assert remaining == (1,)
+    assert not (tmp_path / "blocked-benchmark").exists()
 
 
 @pytest.mark.integration
@@ -163,7 +177,6 @@ def test_loading_benchmark_compares_equivalent_governed_results(
 ) -> None:
     connection = clean_database_connection
     migrate_database(connection)
-    assert_isolated_empty_benchmark_database(connection)
     artifacts = run_loading_benchmark(
         connection,
         tmp_path / "benchmark",
