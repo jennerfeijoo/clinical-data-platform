@@ -67,6 +67,7 @@ jobs:
         run: |
           OUTPUT="$RUNNER_TEMP/loading-benchmark"
           clinical-data-benchmark \
+            --allow-destructive-reset \
             --patients 250 1000 2500 \
             --repetitions 5 \
             --warmups 1 \
