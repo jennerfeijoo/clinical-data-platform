@@ -1,0 +1,87 @@
+name: Update Python compatibility README
+
+on:
+  push:
+    branches:
+      - feat/python-version-matrix
+    paths:
+      - .github/workflows/update-python-readme.yml
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/python-version-matrix
+          fetch-depth: 0
+
+      - name: Update README
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("README.md")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace(
+              "> Status: active development toward `1.0.0` — version `0.17.0` enforces at least 90% statement coverage with behavioral tests across command, orchestration, Synthea, PostgreSQL, and failure boundaries.",
+              "> Status: active development toward `1.0.0` — version `0.18.0` adds PostgreSQL-backed CI across CPython 3.11–3.14 while retaining mandatory statement coverage of at least 90%.",
+          )
+          marker = "## Mandatory test coverage\n"
+          section = """## Python compatibility
+
+Version `0.18.0` declares the explicitly tested range:
+
+```toml
+requires-python = \">=3.11,<3.15\"
+```
+
+| CPython | CI role |
+|---|---|
+| 3.11 | minimum and reference-quality environment |
+| 3.12 | PostgreSQL-backed compatibility matrix |
+| 3.13 | PostgreSQL-backed compatibility matrix |
+| 3.14 | PostgreSQL-backed compatibility matrix |
+| 3.15+ | rejected until added to the tested matrix |
+
+Python 3.11 runs Ruff, strict mypy, coverage, Docker, smoke tests, and the governed loading benchmark. Python 3.12–3.14 each receive an isolated PostgreSQL 16 service and run installation, `pip check`, contracts, migrations, and the complete coverage-gated test suite.
+
+The matrix uses `fail-fast: false`, so every supported interpreter reports its result even if another version fails.
+
+Technical policy: [`docs/python-compatibility.md`](docs/python-compatibility.md).
+
+Spanish guide: [`docs/learning/compatibilidad-python-ci-es.md`](docs/learning/compatibilidad-python-ci-es.md).
+
+"""
+          if section not in text:
+              text = text.replace(marker, section + marker)
+          text = text.replace(
+              "The coverage milestone requires no V009 because it adds tests and quality gates rather than permanent database objects.",
+              "The Python compatibility milestone requires no V009 because it changes package metadata, tests, workflows, and documentation rather than permanent database objects.",
+          )
+          text = text.replace(
+              "- mandatory statement coverage of at least 90% with behavioral command and failure-path tests;\n",
+              "- mandatory statement coverage of at least 90% with behavioral command and failure-path tests;\n- PostgreSQL-backed CPython 3.11–3.14 compatibility CI;\n",
+          )
+          text = text.replace(
+              "## Documentation\n\n",
+              "## Documentation\n\n- [`docs/python-compatibility.md`](docs/python-compatibility.md): supported Python range and CI design;\n- [`docs/learning/compatibilidad-python-ci-es.md`](docs/learning/compatibilidad-python-ci-es.md): Spanish Python compatibility guide;\n",
+          )
+          text = text.replace("- multi-version Python CI;\n", "")
+          text = text.replace(
+              "Coverage is statement coverage and does not prove clinical validity, security, or absence of defects.",
+              "Coverage is statement coverage and does not prove clinical validity, security, or absence of defects. The compatibility matrix covers CPython on Ubuntu runners, not every interpreter, operating system, or architecture.",
+          )
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Commit README update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "Document Python compatibility matrix"
+          git push origin HEAD:feat/python-version-matrix
