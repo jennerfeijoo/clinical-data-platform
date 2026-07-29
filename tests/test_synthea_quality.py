@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from clinical_data_platform.cohort_cli import build_parser
-from clinical_data_platform.synthea import adapt_synthea_csv
+from clinical_data_platform.synthea import SyntheaManifestError, adapt_synthea_csv
 from clinical_data_platform.synthea_cohorts import (
     DEFAULT_COHORT_A_PROFILE,
     DEFAULT_COHORT_B_PROFILE,
@@ -154,7 +154,7 @@ def test_quality_report_refuses_tampered_adapted_artifacts(tmp_path: Path) -> No
         encoding="utf-8",
     )
 
-    with pytest.raises(Exception, match="hash mismatch"):
+    with pytest.raises(SyntheaManifestError, match="hash mismatch"):
         generate_synthea_quality_report(
             cohort_a,
             cohort_b,
