@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clinical-data-platform"
-version = "0.12.0"
-description = "An auditable clinical data platform with reproducible Synthea generation, structured observability, terminology normalization, and immutable lineage."
+version = "0.13.0"
+description = "An auditable clinical data platform with PostgreSQL COPY loading, reproducible Synthea generation, terminology normalization, and immutable lineage."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
