@@ -8,7 +8,7 @@ This sequence is intended for reviewing the repository after running the bundled
 clinical-data run-demo --repository-root .
 ```
 
-The workflow captures six raw datasets, executes their contracts, migrates PostgreSQL through V006, persists accepted rows, and builds the hypertension cohort.
+The workflow captures six raw datasets, executes their contracts, migrates PostgreSQL through V007, resolves coded concepts, persists accepted rows, and builds the hypertension cohort.
 
 ## 2. Verify migration state
 
@@ -20,9 +20,9 @@ clinical-data database-validate
 Expected:
 
 ```text
-detected=6
-current=6
-latest=6
+detected=7
+current=7
+latest=7
 pending=[]
 ```
 
@@ -34,18 +34,20 @@ FROM public.schema_migrations
 ORDER BY version;
 ```
 
-V006 should be `add_medications_and_procedures`.
+V007 should be `add_minimal_clinical_terminologies`.
 
 ## 3. Inspect active contracts
 
 ```powershell
 clinical-data list-contracts
 clinical-data validate-contracts
+clinical-data show-contract diagnoses
+clinical-data show-contract observations
 clinical-data show-contract medications
 clinical-data show-contract procedures
 ```
 
-Confirm that all six active contracts use version `1.0.0`, have 64-character hashes, and match the registry order.
+Contracts validate source structure and declared categorical systems. They do not contain complete external code lists.
 
 ## 4. Inspect raw and processed layers
 
@@ -61,173 +63,283 @@ data/processed/<dataset>/
 └── quality_report.json
 ```
 
-For one medication receipt, verify:
+Confirm that source, raw receipt, contract, run, reference date, and row counts remain traceable independently of terminology resolution.
 
-```powershell
-clinical-data raw-verify `
-  receipts/medications/<YYYY>/<MM>/<DD>/<uuid>.json `
-  --raw-root data/raw
-```
-
-The quality report must link the source hash, receipt, object, contract, run, reference date, and row counts.
-
-## 5. Inspect six entity counts
-
-```sql
-SELECT 'patients' AS dataset, COUNT(*) FROM clinical.patients
-UNION ALL SELECT 'encounters', COUNT(*) FROM clinical.encounters
-UNION ALL SELECT 'diagnoses', COUNT(*) FROM clinical.diagnoses
-UNION ALL SELECT 'observations', COUNT(*) FROM clinical.observations
-UNION ALL SELECT 'medications', COUNT(*) FROM clinical.medications
-UNION ALL SELECT 'procedures', COUNT(*) FROM clinical.procedures
-ORDER BY dataset;
-```
-
-Expected counts:
-
-```text
-patients      5
-encounters    7
-diagnoses     6
-observations 13
-medications   6
-procedures    6
-```
-
-## 6. Inspect medication conversion
+## 5. Inspect registered terminology systems
 
 ```sql
 SELECT
-    medication_id,
-    patient_id,
-    encounter_id,
-    code_system,
-    medication_code,
-    status,
-    start_datetime,
-    end_datetime,
-    dose_value,
-    dose_unit,
-    route,
-    record_sha256
-FROM clinical.medications
-ORDER BY medication_id;
+    code_system_id,
+    canonical_uri,
+    display_name,
+    authority,
+    upstream_version,
+    subset_version,
+    complete_release,
+    license_note
+FROM terminology.code_systems
+ORDER BY code_system_id;
 ```
 
-For `M002`, confirm:
+Review questions:
+
+- Which system is represented completely?
+- Which external releases have explicit versions?
+- Which systems have unresolved upstream-version metadata?
+- Why are licensing notes stored with the registry?
+
+## 6. Inspect aliases
+
+```sql
+SELECT source_system, code_system_id
+FROM terminology.system_aliases
+ORDER BY source_system;
+```
+
+Expected examples:
 
 ```text
-end_datetime = NULL
-dose_value = 500
-dose_unit = mg
-route = ORAL
+ICD10  → ICD10CM
+SNOMED → SNOMEDCT
 ```
 
-This demonstrates conversion of optional CSV strings into typed PostgreSQL values.
+An alias canonicalizes the system identifier. It does not map the source code to a different code.
 
-## 7. Inspect procedure events
+## 7. Inspect concepts
 
 ```sql
 SELECT
-    procedure_id,
-    patient_id,
-    encounter_id,
-    code_system,
-    procedure_code,
-    procedure_datetime,
-    status,
-    record_sha256
-FROM clinical.procedures
-ORDER BY procedure_id;
+    concept_id,
+    code_system_id,
+    code,
+    display,
+    domain,
+    active,
+    verification_status,
+    source_reference
+FROM terminology.concepts
+ORDER BY domain, code_system_id, code;
 ```
 
-Each record must reference an existing patient and encounter.
+Confirm that concepts are separated into:
 
-## 8. Review contract versus database enforcement
+```text
+condition
+observation
+medication
+procedure
+```
 
-Medication contract rules include:
+## 8. Inspect mappings
 
-- expected columns;
-- required values;
-- data types;
-- categorical status, route, and code-system names;
-- start/end temporal order.
+```sql
+SELECT
+    source_system.code_system_id AS source_system,
+    source.code AS source_code,
+    target_system.code_system_id AS target_system,
+    target.code AS target_code,
+    mapping.equivalence,
+    mapping.mapping_version,
+    mapping.review_status,
+    mapping.mapping_method
+FROM terminology.concept_mappings AS mapping
+JOIN terminology.concepts AS source
+    ON source.concept_id = mapping.source_concept_id
+JOIN terminology.code_systems AS source_system
+    ON source_system.code_system_id = source.code_system_id
+JOIN terminology.concepts AS target
+    ON target.concept_id = mapping.target_concept_id
+JOIN terminology.code_systems AS target_system
+    ON target_system.code_system_id = target.code_system_id
+ORDER BY source_system, source_code;
+```
 
-Database rules add:
+Expected mappings:
 
-- foreign keys;
-- positive dose;
-- paired dose value and unit;
-- immutable identity/content behavior.
+```text
+SYSTOLIC_BP  → LOINC 8480-6
+DIASTOLIC_BP → LOINC 8462-4
+HEART_RATE   → LOINC 8867-4
+```
 
-Create a contract-valid medication with a missing encounter and explain why validation succeeds but persistence fails.
+## 9. Compare source and normalized codes
 
-## 9. Demonstrate immutable duplicates
+```sql
+SELECT
+    dataset_name,
+    entity_id,
+    source_system,
+    source_code,
+    normalized_system,
+    normalized_code,
+    normalized_display,
+    domain,
+    verification_status
+FROM terminology.normalized_clinical_codes
+ORDER BY dataset_name, entity_id;
+```
 
-Load the same medications file twice.
+Expected total after a clean demo:
+
+```text
+31 coded clinical rows
+```
+
+This comprises:
+
+```text
+6 diagnoses
+13 observations
+6 medications
+6 procedures
+```
+
+## 10. Trace one observation
+
+Follow `O001`:
+
+```text
+observations.csv
+→ observation_code = SYSTOLIC_BP
+→ executable observation contract
+→ valid_observations.csv
+→ registry conversion
+→ terminology alias LOCAL_OBSERVATION
+→ source concept SYSTOLIC_BP
+→ reviewed mapping
+→ LOINC 8480-6
+→ clinical.observations.normalized_concept_id
+```
 
 Verify:
 
 ```sql
-SELECT medication_id, source_run_id, record_sha256
-FROM clinical.medications
-WHERE medication_id = 'M001';
+SELECT *
+FROM terminology.normalized_clinical_codes
+WHERE dataset_name = 'observations'
+  AND entity_id = 'O001';
 ```
 
-The second receipt and pipeline run exist, but the original event and original `source_run_id` remain unchanged.
+## 11. Trace one diagnosis
 
-## 10. Demonstrate conflict rollback
+```sql
+SELECT *
+FROM terminology.normalized_clinical_codes
+WHERE dataset_name = 'diagnoses'
+  AND entity_id = 'D002';
+```
 
-Create a copy of `medications.csv` that changes `M001.status` from `COMPLETED` to `STOPPED` while retaining `medication_id = M001`.
-
-The contract can accept the row, but loading must fail with:
+Expected:
 
 ```text
-Immutable medication conflict
+source system = ICD10
+source code = I10
+normalized system = ICD10CM
+normalized code = I10
+domain = condition
 ```
+
+This uses a system alias, not a cross-code mapping.
+
+## 12. Trace one medication
+
+```sql
+SELECT *
+FROM terminology.normalized_clinical_codes
+WHERE dataset_name = 'medications'
+  AND entity_id = 'M001';
+```
+
+Expected normalized representation:
+
+```text
+RXNORM:197361
+```
+
+Inspect its `verification_status` and `source_reference` in `terminology.concepts`.
+
+## 13. Demonstrate unknown-code rejection
+
+Create a valid copy of `diagnoses.csv` with:
+
+```text
+D001.diagnosis_code = ZZZ.999
+```
+
+The file contract can accept the row because it is non-empty and the system is allowed. Persistence must fail because the installed terminology subset has no matching concept.
 
 After failure verify:
 
-- `M001` is unchanged;
-- the conflicting `audit.pipeline_runs` row was rolled back;
-- the raw receipt remains available;
-- processed outputs remain available for investigation.
+```text
+clinical.diagnoses contains no partial rows
+the failed audit.pipeline_runs row was rolled back
+raw object and receipt remain
+processed outputs remain
+```
 
-Repeat the same exercise for `PR001`, changing status to `IN_PROGRESS`.
+This demonstrates the boundary between structural validity and recognized clinical semantics.
 
-## 11. Inspect patient history
+## 14. Demonstrate wrong-domain rejection
+
+Run directly in PostgreSQL on a disposable database:
 
 ```sql
-SELECT
-    patient_version_id,
-    patient_id,
-    record_sha256,
-    valid_from_run_id,
-    valid_to_run_id,
-    valid_from,
-    valid_to,
-    is_current
+SELECT terminology.resolve_concept(
+    'LOINC',
+    '8480-6',
+    'medication'
+);
+```
+
+The concept exists but belongs to `observation`, so resolution must fail.
+
+## 15. Inspect V006 to V007 upgrade compatibility
+
+On a disposable database:
+
+```powershell
+clinical-data database-migrate --target-version 6
+clinical-data database-status
+clinical-data database-migrate
+clinical-data database-validate
+```
+
+To test compatibility thoroughly:
+
+1. load a V006-coded row not present in the curated V007 seed;
+2. apply V007;
+3. find the imported concept;
+4. confirm `verification_status = unverified`;
+5. confirm its clinical row has a non-null normalized foreign key.
+
+This behavior supports upgrades without presenting legacy codes as verified.
+
+## 16. Validate all terminology bindings
+
+Using Python:
+
+```python
+from clinical_data_platform.terminology import validate_terminology_bindings
+
+summary = validate_terminology_bindings(connection)
+assert summary.invalid_bindings == 0
+```
+
+The check requires every coded row to have an existing, active concept in the correct domain.
+
+## 17. Inspect patient history and immutable events
+
+Terminology integration does not replace the existing history policy.
+
+```sql
+SELECT *
 FROM clinical.patient_history
 ORDER BY patient_id, patient_version_id;
 ```
 
-Confirm that exactly one current version exists per accepted patient.
+For an immutable coded event, an exact duplicate preserves the original row. A changed source code with the same event identifier remains a conflict and rolls back.
 
-## 12. Compare identities
-
-For one medication load identify:
-
-```text
-source_sha256       → raw CSV bytes
-raw_manifest_sha256 → receipt JSON bytes
-contract_sha256     → executable contract bytes
-run_id              → one pipeline execution
-record_sha256       → normalized medication content
-```
-
-Explain why a new receipt can create a new run without changing `record_sha256`.
-
-## 13. Inspect cohort stability
+## 18. Confirm cohort stability
 
 ```sql
 SELECT *
@@ -235,37 +347,58 @@ FROM analytics.hypertension_features
 ORDER BY patient_id;
 ```
 
-Expected patients remain `P001` and `P002`. Adding medications and procedures must not silently alter the existing cohort definition.
+Expected patients remain:
 
-## 14. Review code in this order
+```text
+P001
+P002
+```
 
-1. `contracts/manifest.toml`;
-2. medication and procedure contracts;
-3. `registry.py` row builders and SQL;
-4. V006 migration;
-5. `history.py`;
-6. `tests/test_additional_entities.py`;
-7. `tests/test_migration.py`;
-8. `tests/test_analysis_workflow.py`.
+Adding terminology bindings must not silently change the existing cohort definition.
 
-For each component identify its responsibility and what it deliberately does not do.
+## 19. Review code in this order
 
-## 15. Key design questions
+1. `V007__add_minimal_clinical_terminologies.sql`;
+2. `terminology.py`;
+3. `migration.py` V007 detection;
+4. `tests/test_terminology.py`;
+5. `tests/test_migration.py`;
+6. `tests/test_analysis_workflow.py`;
+7. `docs/terminology.md`;
+8. `docs/learning/minimal-clinical-terminologies-es.md`.
 
-- Why did adding two entities not require changes to `pipeline.py`?
-- Why are medication and procedure corrections rejected rather than overwritten?
-- Why is dose pairing enforced in PostgreSQL rather than only in the source contract?
-- Why does `code_system` not prove terminology correctness?
-- Why do medications and procedures require both patient and encounter foreign keys?
-- What would be required to add allergies as a seventh entity?
+For each component identify:
 
-## 16. Known limitations
+```text
+responsibility
+enforcement boundary
+lineage retained
+failure behavior
+licensing assumption
+unimplemented production capability
+```
 
-- local filesystem rather than durable object storage;
-- small synthetic fixtures;
-- code-system labels without terminology reference tables;
-- no complete execution-state audit or structured logging;
-- no Synthea generation;
-- no bulk `COPY` or performance benchmark;
-- one demonstrative cohort;
+## 20. Key design questions
+
+- Why preserve source codes after normalization?
+- What is the difference between a system alias and a concept mapping?
+- Why can a contract-valid row fail terminology resolution?
+- Why is domain validation necessary when the code already exists?
+- Why are legacy V006 codes imported as `unverified`?
+- Why is `normalized_concept_id` not included in immutable business hashes?
+- Why are complete CPT and SNOMED CT releases absent?
+- What would a reproducible terminology release importer need to record?
+- Why is this not a FHIR terminology server?
+
+## 21. Known limitations
+
+- small local terminology subset;
+- no release import pipeline;
+- no automatic upstream synchronization;
+- no hierarchy or subsumption queries;
+- no UCUM unit normalization;
+- no multilingual terms;
+- no contextual many-to-many mappings;
+- no FHIR terminology operations;
+- no complete execution-state audit or structured logs;
 - no PHI controls or production deployment claims.
