@@ -1,8 +1,8 @@
 # Clinical Data Platform
 
-> Status: active development toward `1.0.0` — version `0.13.0` adds PostgreSQL `COPY` bulk loading with temporary staging and governed set-based merges.
+> Status: active development toward `1.0.0` — version `0.14.0` adds a reproducible, correctness-gated benchmark for governed PostgreSQL loading.
 
-Clinical Data Platform is a synthetic clinical data engineering project that demonstrates how healthcare-like source files become auditable, analysis-ready, terminology-linked datasets.
+Clinical Data Platform is a synthetic clinical data engineering project that demonstrates how healthcare-like source files become auditable, terminology-linked, analysis-ready datasets.
 
 The repository uses only synthetic data. It is intended for engineering review and learning, not for identifiable patient data, clinical decisions, epidemiological inference, or production healthcare deployment.
 
@@ -57,15 +57,89 @@ INSERT ... SELECT ... ON CONFLICT
 Versioned cohort SQL and feature export
 ```
 
-Structured JSON logs observe each operation, while PostgreSQL stores the authoritative execution state and failure timeline.
+Structured JSON logs observe operations. PostgreSQL stores authoritative execution states, ordered events, retries, and durable failure evidence.
 
 There is no patient-specific pipeline, no Synthea-specific persistence path, no permanent staging schema, and no monolithic schema installer.
 
+## Documented loading benchmark
+
+The repository now contains an executable benchmark comparing:
+
+```text
+COPY FROM STDIN
+→ temporary typed staging
+→ set-based target merge
+```
+
+against the previous application reference:
+
+```text
+psycopg executemany
+→ equivalent row-wise upsert
+```
+
+Both methods write to the same governed clinical tables with terminology resolution, record hashes, patient history, event immutability, indexes, constraints, lineage, and commits active.
+
+The documented protocol uses:
+
+| Control | Value |
+|---|---|
+| Data | deterministic synthetic six-entity workload |
+| Seed | `20260729` |
+| Patient sizes | 250, 1,000, 2,500 |
+| Clinical rows | 3,750, 15,000, 37,500 |
+| Warm-ups | 1 per method and size |
+| Measured repetitions | 5 per method and size |
+| Method order | alternating COPY/executemany and executemany/COPY |
+| Writer concurrency | 1 |
+| PostgreSQL | 16.14 in the reference run |
+
+Every trial must pass row-count, history, terminology, record-hash, and database-content fingerprint checks before its time is accepted.
+
+### Reference result
+
+GitHub Actions workflow run `30466706538` measured:
+
+| Patients | Rows | COPY median | `executemany` median | COPY speedup | Time reduction |
+|---:|---:|---:|---:|---:|---:|
+| 250 | 3,750 | 671.737 ms | 928.806 ms | 1.383× | 27.68% |
+| 1,000 | 15,000 | 2,615.950 ms | 3,693.506 ms | 1.412× | 29.17% |
+| 2,500 | 37,500 | 6,465.960 ms | 9,176.855 ms | 1.419× | 29.54% |
+
+This supports an environment-specific statement: in the recorded hosted-runner environment, COPY reduced median governed initial-load time by approximately 27.7–29.5% relative to the previous `executemany` path.
+
+It does not prove that the complete pipeline is 30% faster or that the same result applies to production, remote PostgreSQL, concurrent writers, updates, or larger datasets.
+
+Permanent evidence:
+
+```text
+benchmarks/loading/github-actions-run-30466706538/
+├── benchmark-summary.md
+├── benchmark-trials.csv
+└── reference-run.json
+```
+
+Technical protocol: [`docs/loading-benchmark.md`](docs/loading-benchmark.md).
+
+Spanish study guide: [`docs/learning/benchmark-carga-postgresql-es.md`](docs/learning/benchmark-carga-postgresql-es.md).
+
+Run locally against an isolated, disposable platform database:
+
+```powershell
+.\scripts\run_benchmark.ps1
+```
+
+or:
+
+```bash
+./scripts/run_benchmark.sh
+```
+
+The benchmark truncates platform run state between trials. Do not point it at a database containing data that must be retained.
+
 ## PostgreSQL COPY loading
 
-Validated outputs are inspected and counted without retaining a persistence batch in memory. They are then reopened as streaming iterators, converted to typed Python values one row at a time, and transmitted using psycopg `COPY FROM STDIN`.
-
-Clinical rows follow:
+Validated outputs are inspected and counted without retaining a persistence batch in memory. They are reopened as iterators, converted to typed Python values one row at a time, and transmitted with psycopg `COPY FROM STDIN`.
 
 ```text
 valid_<dataset>.csv
@@ -75,18 +149,18 @@ valid_<dataset>.csv
 → target triggers and constraints
 ```
 
-COPY does not write directly to the governed target because direct COPY cannot express the required `ON CONFLICT` policies. Temporary staging separates efficient transfer from clinical reconciliation.
+COPY does not write directly to the governed target because direct COPY cannot express the required conflict policies. Temporary staging separates efficient transfer from clinical reconciliation.
 
 Each staging table:
 
 ```text
-has PostgreSQL target column types
+has target PostgreSQL column types
 has a unique session-local name
 uses ON COMMIT DROP
 has no copied indexes, constraints, or triggers
 ```
 
-The subsequent target merge keeps all target controls active. This preserves:
+The target merge keeps all target controls active:
 
 ```text
 patients
@@ -99,12 +173,10 @@ coded entities
 → terminology resolution
 
 all entities
-→ foreign keys, checks, lineage, audit, rollback, and retries
+→ foreign keys, checks, lineage, rollback, and retries
 ```
 
-Validation errors are also loaded with COPY inside the same clinical transaction. A COPY, merge, terminology, history, or constraint failure rolls back the clinical work and is stored as a durable failed attempt in a separate transaction.
-
-This milestone proves that the platform uses a correct bulk-loading route. It does not yet claim a measured performance improvement; the documented benchmark is the next roadmap milestone.
+Validation errors are also loaded with COPY inside the same clinical transaction. A COPY, merge, terminology, history, or constraint failure rolls back clinical changes and is stored as a durable failed attempt in a separate transaction.
 
 See [`docs/bulk-loading.md`](docs/bulk-loading.md).
 
@@ -119,14 +191,14 @@ src/clinical_data_platform/synthea_profiles/reproducible_small.toml
 | Control | Value |
 |---|---|
 | Synthea release | `v4.0.0` |
-| population | 100 |
-| random seed | 20260729 |
-| clinician seed | 20260730 |
-| reference date | 2026-07-29 |
-| geography | Massachusetts |
-| threads | 1 |
-| retained history | complete |
-| export | six CSV files |
+| Population | 100 |
+| Random seed | 20260729 |
+| Clinician seed | 20260730 |
+| Reference date | 2026-07-29 |
+| Geography | Massachusetts |
+| Threads | 1 |
+| Retained history | complete |
+| Export | six CSV files |
 
 Generation records the resolved upstream commit, Java version, normalized command, exact headers, row counts, byte sizes, per-file SHA-256 values, and a dataset fingerprint.
 
@@ -141,7 +213,7 @@ Synthea medications.csv   → medications.csv
 Synthea procedures.csv    → procedures.csv
 ```
 
-It also creates `terminology.csv` and `synthea-adaptation-manifest.json`. Missing source-event identifiers use deterministic UUIDv5 values. Parent relationships, exact source headers, output contracts, omitted-row counts, terminology concepts, hashes, and fingerprints are verified.
+It also creates `terminology.csv` and `synthea-adaptation-manifest.json`. Missing source-event identifiers use deterministic UUIDv5 values. Parent relationships, source headers, output contracts, omissions, terminology concepts, hashes, and fingerprints are verified.
 
 The observation adapter deliberately retains only:
 
@@ -159,7 +231,7 @@ Generate and adapt:
 .\scripts\generate_synthea.ps1
 ```
 
-Load the normalized population through the same COPY persistence route:
+Load through the same governed COPY route:
 
 ```powershell
 clinical-data synthea-load `
@@ -231,9 +303,9 @@ validated
 
 Loading uses separate transaction boundaries:
 
-1. validated run registration, local-journal import, and loading acquisition commit;
-2. COPY staging, target merge, validation-error COPY, and completion commit atomically;
-3. after rollback, failed is stored in a new transaction.
+1. Validated-run registration, journal import, and loading acquisition commit.
+2. COPY staging, target merge, validation-error COPY, and completion commit atomically.
+3. After rollback, failed status is stored in a new transaction.
 
 This preserves:
 
@@ -246,7 +318,7 @@ Completed runs are idempotent: a repeated load returns before creating staging o
 
 ## Structured application logging
 
-The console entrypoint emits operational telemetry to `stderr`. JSON is the default representation.
+The console entrypoint emits operational telemetry to `stderr`; JSON is the default representation.
 
 ```text
 CLINICAL_DATA_LOG_LEVEL  = DEBUG | INFO | WARNING | ERROR | CRITICAL
@@ -307,9 +379,9 @@ V007 minimal terminology integration
 V008 execution lifecycle and durable failure audit
 ```
 
-COPY loading does not require V009 because staging tables are temporary and no permanent database object changes.
+COPY loading and benchmarking do not require V009 because they introduce application workflows, temporary tables, and evidence files rather than permanent database objects.
 
-Current migration state remains:
+Current migration state:
 
 ```text
 detected=8
@@ -333,6 +405,8 @@ pending=[]
 - PostgreSQL COPY loading with temporary typed staging;
 - set-based target reconciliation with triggers preserved;
 - bounded-memory persistence iteration;
+- reproducible correctness-gated loading benchmark;
+- committed trial-level benchmark evidence;
 - versioned hypertension cohort and feature export;
 - Docker, Compose, PowerShell, POSIX, Ruff, strict mypy, pytest, PostgreSQL integration, and GitHub Actions.
 
@@ -400,16 +474,20 @@ clinical-data synthea-profile
 clinical-data validate-contracts
 clinical-data database-migrate
 clinical-data database-validate
+clinical-data-benchmark --patients 8 --repetitions 2 --warmups 0 --output-dir /tmp/benchmark
 python -m ruff check .
 python -m mypy src
 python -m pytest --cov=clinical_data_platform --cov-report=term-missing
 docker build --tag clinical-data-platform:local .
 ```
 
-Normal CI validates COPY staging and merge behavior, streaming CSV inspection, all six entities, terminology, history, immutable conflicts, retries, failure rollback, contracts, migrations, raw capture, Synthea adaptation, Docker, and container smoke tests.
+Normal CI validates benchmark equivalence on a small workload, COPY staging and merge behavior, streaming CSV inspection, all six entities, terminology, history, immutable conflicts, retries, failure rollback, contracts, migrations, raw capture, Synthea adaptation, Docker, and container smoke tests.
+
+The dedicated Benchmark workflow runs the larger documented profile and uploads JSON, CSV, and Markdown evidence.
 
 ## Documentation
 
+- [`docs/loading-benchmark.md`](docs/loading-benchmark.md): protocol, evidence, results, and limits;
 - [`docs/bulk-loading.md`](docs/bulk-loading.md): COPY, staging, merge, transactions, and limitations;
 - [`docs/synthea.md`](docs/synthea.md): generation, manifests, adapter, verification, and loading;
 - [`docs/architecture.md`](docs/architecture.md): system architecture and boundaries;
@@ -420,14 +498,14 @@ Normal CI validates COPY staging and merge behavior, streaming CSV inspection, a
 - [`docs/clinical-entities.md`](docs/clinical-entities.md): six-entity model;
 - [`docs/terminology.md`](docs/terminology.md): terminology model and licensing boundary;
 - [`docs/analysis-guide.md`](docs/analysis-guide.md): repository review sequence;
-- [`docs/learning/postgresql-copy-es.md`](docs/learning/postgresql-copy-es.md): guía de estudio en español;
-- [`docs/learning/reproducible-synthea-es.md`](docs/learning/reproducible-synthea-es.md): guía de reproducibilidad Synthea.
+- [`docs/learning/benchmark-carga-postgresql-es.md`](docs/learning/benchmark-carga-postgresql-es.md): guía del benchmark;
+- [`docs/learning/postgresql-copy-es.md`](docs/learning/postgresql-copy-es.md): guía de COPY;
+- [`docs/learning/reproducible-synthea-es.md`](docs/learning/reproducible-synthea-es.md): guía de Synthea.
 
 ## Current limitations
 
 The repository is not yet version `1.0.0`. Remaining milestones include:
 
-- a documented performance benchmark using larger reproducible populations;
 - an additional reproducible cohort;
 - attrition and missingness reports;
 - coverage of at least 90%;
@@ -436,7 +514,9 @@ The repository is not yet version `1.0.0`. Remaining milestones include:
 - non-root container hardening;
 - final documentation and release `1.0.0`.
 
-COPY currently uses psycopg row adaptation rather than binary COPY. Contract validation still materializes the complete source dataset. The full Synthea generator is not executed in normal CI. The adapter supports six CSV files and three observation concepts. The logging layer has no centralized transport or OpenTelemetry. The project excludes identifiable patient data, production decision support, epidemiological validity claims, and regulatory deployment claims.
+The benchmark measures initial single-writer loading, not end-to-end latency, updates, concurrency, remote databases, WAL volume, or peak memory. COPY uses psycopg row adaptation rather than binary COPY. Contract validation still materializes the complete source dataset. The full Synthea generator is not executed in normal CI. The adapter supports six CSV files and three observation concepts. The logging layer has no centralized transport or OpenTelemetry.
+
+The project excludes identifiable patient data, production decision support, epidemiological validity claims, regulatory deployment claims, and production-capacity claims.
 
 ## License
 
