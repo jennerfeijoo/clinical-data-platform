@@ -13,7 +13,17 @@ RUN python -m venv /opt/venv \
         pip \
         "setuptools>=83" \
         "wheel>=0.46.2" \
-    && /opt/venv/bin/python -m pip install --no-cache-dir .
+    && /opt/venv/bin/python -m pip install --no-cache-dir . \
+    && /opt/venv/bin/python -m pip uninstall -y \
+        pip \
+        setuptools \
+        wheel \
+    && rm -rf \
+        /opt/venv/bin/pip* \
+        /opt/venv/lib/python3.11/site-packages/pip* \
+        /opt/venv/lib/python3.11/site-packages/setuptools* \
+        /opt/venv/lib/python3.11/site-packages/_distutils_hack \
+        /opt/venv/lib/python3.11/site-packages/wheel*
 
 FROM python:3.11-slim AS runtime
 
@@ -23,21 +33,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN python -m pip uninstall -y \
-        pip \
-        setuptools \
-        wheel \
-        msgpack \
-        jaraco.context \
-        || true \
-    && rm -rf \
+RUN rm -rf \
         /usr/local/bin/pip* \
-        /usr/local/lib/python3.11/site-packages/pip* \
-        /usr/local/lib/python3.11/site-packages/setuptools* \
-        /usr/local/lib/python3.11/site-packages/_distutils_hack \
-        /usr/local/lib/python3.11/site-packages/wheel* \
-        /usr/local/lib/python3.11/site-packages/msgpack* \
-        /usr/local/lib/python3.11/site-packages/jaraco*
+        /usr/local/lib/python3.11/ensurepip \
+        /usr/local/lib/python3.11/site-packages/*
 
 COPY --from=builder /opt/venv /opt/venv
 COPY data ./data
