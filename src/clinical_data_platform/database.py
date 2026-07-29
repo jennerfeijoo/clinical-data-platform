@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -13,6 +14,7 @@ from uuid import UUID
 
 import psycopg
 
+from clinical_data_platform.bulk import copy_merge_rows, copy_rows
 from clinical_data_platform.contract import load_contract_by_resource
 from clinical_data_platform.execution import (
     EXECUTION_JOURNAL_VERSION,
@@ -20,7 +22,7 @@ from clinical_data_platform.execution import (
     ExecutionJournalSummary,
     read_execution_journal,
 )
-from clinical_data_platform.ingestion import read_csv_records
+from clinical_data_platform.ingestion import CsvInspection, inspect_csv_records, iter_csv_records
 from clinical_data_platform.raw import RAW_STORAGE_VERSION, verify_raw_receipt
 from clinical_data_platform.registry import get_dataset_definition
 from clinical_data_platform.run_audit import (
@@ -41,6 +43,25 @@ from clinical_data_platform.structured_logging import (
 )
 
 LOGGER = get_logger("database")
+VALIDATION_ERROR_SOURCE_COLUMNS = (
+    "row_number",
+    "entity_id",
+    "patient_id",
+    "field",
+    "rule",
+    "message",
+    "value",
+)
+VALIDATION_ERROR_TARGET_COLUMNS = (
+    "run_id",
+    "row_number",
+    "entity_id",
+    "patient_id",
+    "field_name",
+    "rule_name",
+    "message",
+    "rejected_value",
+)
 
 
 class DatabaseConfigurationError(RuntimeError):
@@ -93,6 +114,8 @@ class DatasetPersistenceSummary:
     final_status: str
     records_upserted: int
     validation_errors_inserted: int
+    records_merged: int = 0
+    loading_method: str = "postgresql_copy"
 
 
 def database_url_from_environment() -> str:
@@ -190,18 +213,29 @@ def _read_quality_report(path: Path) -> QualityReport:
 
 def _validate_output_counts(
     report: QualityReport,
-    valid_records: list[dict[str, str]],
-    invalid_records: list[dict[str, str]],
-    validation_errors: list[dict[str, str]],
+    valid_rows: int,
+    invalid_rows: int,
+    validation_error_rows: int,
 ) -> None:
-    if report["rows_received"] != len(valid_records) + len(invalid_records):
+    if report["rows_received"] != valid_rows + invalid_rows:
         raise PersistenceError("rows_received does not match the generated CSV outputs.")
-    if report["rows_valid"] != len(valid_records):
+    if report["rows_valid"] != valid_rows:
         raise PersistenceError("rows_valid does not match the valid-record output.")
-    if report["rows_invalid"] != len(invalid_records):
+    if report["rows_invalid"] != invalid_rows:
         raise PersistenceError("rows_invalid does not match the invalid-record output.")
-    if report["validation_errors"] != len(validation_errors):
+    if report["validation_errors"] != validation_error_rows:
         raise PersistenceError("validation_errors does not match validation_errors.csv.")
+
+
+def _validate_output_columns(
+    inspection: CsvInspection,
+    expected_columns: tuple[str, ...],
+    label: str,
+) -> None:
+    if inspection.columns != expected_columns:
+        raise PersistenceError(
+            f"{label} columns do not match the expected validated-output schema."
+        )
 
 
 def _validate_contract_lineage(report: QualityReport, dataset: str) -> None:
@@ -302,6 +336,20 @@ def _registration(
     )
 
 
+def _validation_error_rows(path: Path, run_id: UUID) -> Iterator[tuple[object, ...]]:
+    for error in iter_csv_records(path):
+        yield (
+            run_id,
+            int(error["row_number"]),
+            error["entity_id"] or None,
+            error["patient_id"] or None,
+            error["field"],
+            error["rule"],
+            error["message"],
+            error["value"] or None,
+        )
+
+
 def persist_dataset_validation_outputs(
     connection: psycopg.Connection[Any],
     dataset: str,
@@ -309,8 +357,11 @@ def persist_dataset_validation_outputs(
     *,
     raw_root: Path,
 ) -> DatasetPersistenceSummary:
-    """Load one verified dataset while durably auditing every loading attempt."""
+    """Load one verified dataset with COPY while auditing every loading attempt."""
     definition = get_dataset_definition(dataset)
+    valid_path = output_directory / f"valid_{dataset}.csv"
+    invalid_path = output_directory / f"invalid_{dataset}.csv"
+    validation_errors_path = output_directory / "validation_errors.csv"
 
     with ensure_correlation_id():
         with log_operation(
@@ -321,16 +372,21 @@ def persist_dataset_validation_outputs(
             dataset=dataset,
         ) as preflight_log:
             report = _read_quality_report(output_directory / "quality_report.json")
-            valid_records = read_csv_records(output_directory / f"valid_{dataset}.csv")
-            invalid_records = read_csv_records(output_directory / f"invalid_{dataset}.csv")
-            validation_errors = read_csv_records(
-                output_directory / "validation_errors.csv"
+            valid_output = inspect_csv_records(valid_path)
+            invalid_output = inspect_csv_records(invalid_path)
+            error_output = inspect_csv_records(validation_errors_path)
+            _validate_output_columns(valid_output, definition.columns, "Valid-record output")
+            _validate_output_columns(invalid_output, definition.columns, "Invalid-record output")
+            _validate_output_columns(
+                error_output,
+                VALIDATION_ERROR_SOURCE_COLUMNS,
+                "Validation-error output",
             )
             _validate_output_counts(
                 report,
-                valid_records,
-                invalid_records,
-                validation_errors,
+                valid_output.row_count,
+                invalid_output.row_count,
+                error_output.row_count,
             )
 
             if report["dataset"] != dataset:
@@ -365,10 +421,11 @@ def persist_dataset_validation_outputs(
             preflight_log.update(
                 {
                     "run_id": str(run_id),
-                    "rows_valid": len(valid_records),
-                    "rows_invalid": len(invalid_records),
-                    "validation_errors": len(validation_errors),
+                    "rows_valid": valid_output.row_count,
+                    "rows_invalid": invalid_output.row_count,
+                    "validation_errors": error_output.row_count,
                     "contract_version": report["contract_version"],
+                    "loading_method": "postgresql_copy",
                 }
             )
 
@@ -379,8 +436,9 @@ def persist_dataset_validation_outputs(
                 "persistence.run.started",
                 "Started dataset persistence run.",
                 stage="audit_registration",
-                rows_valid=len(valid_records),
-                validation_errors=len(validation_errors),
+                rows_valid=valid_output.row_count,
+                validation_errors=error_output.row_count,
+                loading_method="postgresql_copy",
             )
             try:
                 with log_operation(
@@ -419,6 +477,7 @@ def persist_dataset_validation_outputs(
                     status="completed",
                     attempt_number=attempt.attempt_number,
                     already_loaded=True,
+                    loading_method="postgresql_copy",
                 )
                 return DatasetPersistenceSummary(
                     run_id=run_id,
@@ -431,60 +490,88 @@ def persist_dataset_validation_outputs(
                     validation_errors_inserted=0,
                 )
 
+            records_copied = 0
+            records_merged = 0
+            errors_copied = 0
             try:
-                record_values = definition.row_builder(
-                    valid_records,
-                    run_id,
-                    report["input_sha256"],
-                )
-                error_values = [
-                    (
-                        run_id,
-                        int(error["row_number"]),
-                        error["entity_id"] or None,
-                        error["patient_id"] or None,
-                        error["field"],
-                        error["rule"],
-                        error["message"],
-                        error["value"] or None,
-                    )
-                    for error in validation_errors
-                ]
-
                 with log_operation(
                     LOGGER,
                     "persistence.transaction",
                     operation="persist_clinical_dataset",
                     stage="persistence",
                     attempt_number=attempt.attempt_number,
-                    records_attempted=len(record_values),
-                    validation_errors_attempted=len(error_values),
+                    records_attempted=valid_output.row_count,
+                    validation_errors_attempted=error_output.row_count,
+                    loading_method="postgresql_copy",
                 ) as transaction_log:
                     with connection.transaction():
-                        if record_values:
-                            with connection.cursor() as cursor:
-                                cursor.executemany(definition.upsert_sql, record_values)
-                        if error_values:
-                            with connection.cursor() as cursor:
-                                cursor.executemany(
-                                    """
-                                    INSERT INTO audit.validation_errors (
-                                        run_id, row_number, entity_id, patient_id,
-                                        field_name, rule_name, message, rejected_value
-                                    )
-                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                                    """,
-                                    error_values,
+                        with log_operation(
+                            LOGGER,
+                            "persistence.copy",
+                            operation="copy_records_to_staging",
+                            stage="copy_staging",
+                            attempt_number=attempt.attempt_number,
+                            records_attempted=valid_output.row_count,
+                            loading_method="postgresql_copy",
+                        ) as copy_log:
+                            copy_summary = copy_merge_rows(
+                                connection,
+                                definition.copy_plan,
+                                definition.row_builder(
+                                    iter_csv_records(valid_path),
+                                    run_id,
+                                    report["input_sha256"],
+                                ),
+                            )
+                            records_copied = copy_summary.rows_copied
+                            records_merged = copy_summary.rows_merged
+                            if records_copied != valid_output.row_count:
+                                raise PersistenceError(
+                                    "COPY row count changed after validation-output preflight."
                                 )
+                            copy_log.update(
+                                {
+                                    "rows_copied": records_copied,
+                                    "rows_merged": records_merged,
+                                    "staging_table": copy_summary.staging_table,
+                                }
+                            )
+
+                        with log_operation(
+                            LOGGER,
+                            "persistence.validation_error_copy",
+                            operation="copy_validation_errors",
+                            stage="copy_validation_errors",
+                            attempt_number=attempt.attempt_number,
+                            validation_errors_attempted=error_output.row_count,
+                            loading_method="postgresql_copy",
+                        ) as error_copy_log:
+                            errors_copied = copy_rows(
+                                connection,
+                                schema="audit",
+                                table="validation_errors",
+                                columns=VALIDATION_ERROR_TARGET_COLUMNS,
+                                rows=_validation_error_rows(
+                                    validation_errors_path,
+                                    run_id,
+                                ),
+                            )
+                            if errors_copied != error_output.row_count:
+                                raise PersistenceError(
+                                    "Validation-error COPY count changed after preflight."
+                                )
+                            error_copy_log["validation_errors_copied"] = errors_copied
+
                         complete_loading_attempt(
                             connection,
                             run_id,
                             attempt.attempt_number,
-                            records_persisted=len(record_values),
-                            validation_errors_persisted=len(error_values),
+                            records_persisted=records_copied,
+                            validation_errors_persisted=errors_copied,
                         )
-                    transaction_log["records_persisted"] = len(record_values)
-                    transaction_log["validation_errors_persisted"] = len(error_values)
+                    transaction_log["records_copied"] = records_copied
+                    transaction_log["records_merged"] = records_merged
+                    transaction_log["validation_errors_copied"] = errors_copied
             except Exception as exc:
                 try:
                     fail_loading_attempt(
@@ -494,8 +581,11 @@ def persist_dataset_validation_outputs(
                         exc,
                         details={
                             "dataset": dataset,
-                            "records_attempted": len(valid_records),
-                            "validation_errors_attempted": len(validation_errors),
+                            "loading_method": "postgresql_copy",
+                            "records_attempted": valid_output.row_count,
+                            "records_copied_before_failure": records_copied,
+                            "validation_errors_attempted": error_output.row_count,
+                            "validation_errors_copied_before_failure": errors_copied,
                         },
                     )
                     emit_log(
@@ -506,6 +596,7 @@ def persist_dataset_validation_outputs(
                         stage="persistence",
                         status="failed",
                         attempt_number=attempt.attempt_number,
+                        loading_method="postgresql_copy",
                         **safe_exception_fields(exc),
                     )
                 except Exception as audit_exc:
@@ -516,6 +607,7 @@ def persist_dataset_validation_outputs(
                         "Clinical rollback succeeded but durable failure audit failed.",
                         stage="failure_audit",
                         attempt_number=attempt.attempt_number,
+                        loading_method="postgresql_copy",
                         **safe_exception_fields(audit_exc),
                     )
                     exc.add_note(f"Failure audit could not be persisted: {audit_exc}")
@@ -529,8 +621,10 @@ def persist_dataset_validation_outputs(
                 stage="completed",
                 status="completed",
                 attempt_number=attempt.attempt_number,
-                records_persisted=len(record_values),
-                validation_errors_persisted=len(error_values),
+                records_persisted=records_copied,
+                records_merged=records_merged,
+                validation_errors_persisted=errors_copied,
+                loading_method="postgresql_copy",
             )
             return DatasetPersistenceSummary(
                 run_id=run_id,
@@ -539,6 +633,7 @@ def persist_dataset_validation_outputs(
                 already_loaded=False,
                 attempt_number=attempt.attempt_number,
                 final_status="completed",
-                records_upserted=len(record_values),
-                validation_errors_inserted=len(error_values),
+                records_upserted=records_copied,
+                validation_errors_inserted=errors_copied,
+                records_merged=records_merged,
             )
