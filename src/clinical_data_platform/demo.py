@@ -22,6 +22,7 @@ class DemoSummary:
     """Key identifiers and counts produced by the demonstration workflow."""
 
     dataset_run_ids: dict[str, UUID]
+    raw_receipt_ids: dict[str, UUID]
     cohort: CohortSummary
 
     @property
@@ -37,8 +38,9 @@ def run_demo(
     reference_date: date = date(2026, 7, 29),
     baseline_existing: bool = False,
 ) -> DemoSummary:
-    """Migrate, validate, persist, and analyze all registered bundled datasets."""
+    """Capture, migrate, validate, persist, and analyze bundled datasets."""
     sample_directory = repository_root / "data" / "sample"
+    raw_directory = repository_root / "data" / "raw"
     processed_directory = repository_root / "data" / "processed"
     analytics_directory = repository_root / "data" / "analytics"
     cohort_sql_path = repository_root / "sql" / "cohorts" / "hypertension.sql"
@@ -48,6 +50,7 @@ def run_demo(
             dataset,
             sample_directory / f"{dataset}.csv",
             processed_directory / dataset,
+            raw_root=raw_directory,
             reference_date=reference_date,
         )
         for dataset in dataset_names()
@@ -60,6 +63,7 @@ def run_demo(
                 connection,
                 dataset,
                 processed_directory / dataset,
+                raw_root=raw_directory,
             )
         cohort_summary = build_hypertension_cohort(
             connection,
@@ -70,6 +74,10 @@ def run_demo(
     return DemoSummary(
         dataset_run_ids={
             dataset: summary.run_id for dataset, summary in validation_summaries.items()
+        },
+        raw_receipt_ids={
+            dataset: summary.raw_receipt_id
+            for dataset, summary in validation_summaries.items()
         },
         cohort=cohort_summary,
     )
