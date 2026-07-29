@@ -9,10 +9,10 @@ from uuid import UUID
 
 from clinical_data_platform.cohort import CohortSummary, build_hypertension_cohort
 from clinical_data_platform.database import (
-    apply_schema,
     connect_database,
     persist_dataset_validation_outputs,
 )
+from clinical_data_platform.migration import migrate_database
 from clinical_data_platform.pipeline import run_dataset_validation
 from clinical_data_platform.registry import dataset_names
 
@@ -35,12 +35,12 @@ def run_demo(
     database_url: str,
     *,
     reference_date: date = date(2026, 7, 29),
+    baseline_existing: bool = False,
 ) -> DemoSummary:
-    """Validate, persist, and analyze all registered bundled datasets."""
+    """Migrate, validate, persist, and analyze all registered bundled datasets."""
     sample_directory = repository_root / "data" / "sample"
     processed_directory = repository_root / "data" / "processed"
     analytics_directory = repository_root / "data" / "analytics"
-    schema_path = repository_root / "sql" / "schema.sql"
     cohort_sql_path = repository_root / "sql" / "cohorts" / "hypertension.sql"
 
     validation_summaries = {
@@ -54,7 +54,7 @@ def run_demo(
     }
 
     with connect_database(database_url) as connection:
-        apply_schema(connection, schema_path)
+        migrate_database(connection, baseline_existing=baseline_existing)
         for dataset in dataset_names():
             persist_dataset_validation_outputs(
                 connection,
