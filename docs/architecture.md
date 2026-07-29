@@ -2,40 +2,7 @@
 
 ## System boundary
 
-The repository is progressing toward a portfolio-grade clinical data platform. It operates only on synthetic data and is not a clinical production system.
-
-## Architectural objective
-
-Source preservation, data acceptance, schema evolution, historical semantics, persistence, and analytical derivation must be explicit and independently reviewable.
-
-```text
-External source
-    │
-    ▼
-Immutable raw landing zone
-    │
-    ▼
-Active contract manifest
-    │
-    ▼
-Versioned executable contract
-    │
-    ▼
-Generic validation pipeline
-    │
-    ▼
-Formal PostgreSQL migrations
-    │
-    ▼
-Hybrid clinical persistence
-    ├── current patient snapshot + SCD2 history
-    └── immutable clinical events
-    │
-    ▼
-Versioned cohort SQL
-```
-
-The generic pipeline contains no patient-specific validation path. Database creation contains no monolithic `schema.sql` path.
+The repository is a portfolio-grade synthetic clinical data engineering platform under active development. It is not a clinical production system and must not receive identifiable patient data.
 
 ## End-to-end flow
 
@@ -43,245 +10,159 @@ The generic pipeline contains no patient-specific validation path. Database crea
 External CSV source
         │
         ▼
-Raw capture before parsing
-        ├── SHA-256 + byte size
+Immutable raw landing zone
         ├── content-addressed object
-        ├── append-only receipt
-        └── atomic publication
+        └── append-only receipt
         │
         ▼
-Read captured raw object
+Active contract manifest
         │
         ▼
-Registry + active contract lookup
+Versioned executable contract
         │
         ▼
-Contract rule execution
+Generic validation pipeline
         ├── valid rows
-        ├── invalid rows
+        ├── quarantine
         ├── normalized errors
-        └── quality report with raw + contract lineage
+        └── quality report
         │
         ▼
-Migration validation and pending migrations
+Formal migrations V001–V006
         │
         ▼
-Raw receipt/object verification
+Lineage verification
         │
         ▼
-Contract-lineage verification
-        │
-        ▼
-Transactional PostgreSQL persistence
-        ├── SCD2 patient transitions
-        └── immutable-event conflict checks
+Hybrid PostgreSQL persistence
+        ├── patient snapshot + SCD2 history
+        └── immutable clinical events
         │
         ▼
 Versioned cohort SQL and feature export
 ```
 
-## Raw storage model
+## Clinical relationship model
 
 ```text
-data/raw/
-├── objects/sha256/<prefix>/<sha256>/source.csv
-└── receipts/<dataset>/<YYYY>/<MM>/<DD>/<uuid>.json
+patients
+   └── encounters
+          ├── diagnoses
+          ├── observations
+          ├── medications
+          └── procedures
 ```
 
-Objects model byte content. Receipts model ingestion events. Identical bytes share an object while retaining distinct receipt manifests.
-
-The application writes to staging, fsyncs, and atomically publishes with a hard link. Existing final paths are never replaced. Published files are marked read-only and verified by SHA-256 before reuse.
-
-This is application-level local immutability, not certified WORM storage.
-
-## Contract resource model
-
-Contracts are packaged under `src/clinical_data_platform/contracts/`. The manifest explicitly selects an active version. Historical resources remain available for verification by path, semantic version, and SHA-256.
-
-## Migration resource model
-
-```text
-src/clinical_data_platform/migrations/
-├── V001__create_core_clinical_schema.sql
-├── V002__add_longitudinal_entities_and_cohorts.sql
-├── V003__add_contract_lineage.sql
-├── V004__add_raw_landing_lineage.sql
-└── V005__add_clinical_history_policy.sql
-```
-
-History is stored in `public.schema_migrations`. V005 adds record hashes, patient history, and immutable-event guards.
-
-## Clinical persistence model
-
-### Patients
-
-```text
-clinical.patients
-    → current accepted snapshot
-
-clinical.patient_history
-    → SCD Type 2 versions
-```
-
-A business-content change closes the current history version and inserts a new one. An identical patient snapshot may refresh current-run lineage without creating another historical version.
-
-### Encounters, diagnoses, and observations
-
-These tables model immutable source events.
-
-```text
-same identifier + same normalized content
-    → no-op; preserve original event lineage
-
-same identifier + different normalized content
-    → integrity error; rollback dataset transaction
-```
-
-The policy is declared in `history.py` and enforced by PostgreSQL triggers installed by V005.
-
-## Hash model
-
-```text
-source_sha256
-    → complete raw source object
-
-raw_manifest_sha256
-    → receipt manifest bytes
-
-contract_sha256
-    → executable contract bytes
-
-record_sha256
-    → normalized business content of one clinical row
-```
-
-Run lineage and load timestamps are excluded from `record_sha256`, preventing repeated receipt of identical clinical content from becoming a false business change.
-
-Event timestamps are normalized to UTC before hashing.
+The six datasets use the same raw, contract, pipeline, persistence, and audit algorithms. Dataset-specific behavior is confined to executable contracts, row builders, persistence SQL, migrations, and explicit history policies.
 
 ## Core modules
 
 ### `raw.py`
 
-Preserves and verifies exact source bytes. It does not parse clinical fields or connect to PostgreSQL.
+Preserves exact source bytes, derives SHA-256 content paths, creates receipt manifests, publishes atomically, prevents application-level replacement, and verifies integrity.
 
 ### `contract.py`
 
-Parses versioned TOML contracts, validates contract consistency, executes structural and clinical rules, and returns normalized validation results.
+Loads TOML contracts, validates contract definitions, calculates contract hashes, and executes structural, categorical, temporal, type, unit, and plausible-range rules.
 
 ### `pipeline.py`
 
-Enforces:
-
-```text
-capture raw
-→ read raw object
-→ execute active contract
-→ write quality outputs
-```
-
-### `migration.py`
-
-Discovers V001–V005, validates immutable checksums and complete schema signatures, serializes migrations with an advisory lock, and applies pending migrations transactionally.
-
-### `history.py`
-
-Declares which datasets use:
-
-```text
-scd2_snapshot
-immutable_event
-```
-
-It documents policy intent; PostgreSQL remains the enforcement boundary.
+Orchestrates raw capture, parsing of the captured object, contract validation, and generation of quality outputs. It contains no dataset-specific validation path.
 
 ### `registry.py`
 
-Keeps typed row conversion and dataset-specific SQL outside the generic pipeline.
+Maps each dataset to typed row conversion and PostgreSQL persistence SQL. Adding medications and procedures required new registry entries but no change to the generic pipeline or database orchestration.
+
+### `migration.py`
+
+Discovers V001–V006, checks immutable migration hashes, detects complete schema signatures, serializes migration execution with an advisory lock, and applies pending versions transactionally.
+
+### `history.py`
+
+Declares persistence semantics:
+
+- patients: `scd2_snapshot`;
+- encounters, diagnoses, observations, medications, procedures: `immutable_event`.
 
 ### `database.py`
 
-Verifies output counts, historical contract lineage, raw receipts, raw objects, and then persists one complete validation run transactionally.
+Verifies processed outputs, contract lineage, raw receipt/object lineage, and then persists one complete run transactionally.
 
-### `demo.py`
+### `cohort.py`
 
-Coordinates raw capture, validation, migration, persistence, cohort construction, and export for all registered datasets.
+Builds versioned analytical cohorts and records source-run lineage.
 
-## Validation and enforcement boundaries
+## Validation boundaries
 
 ### Raw boundary
 
-Controls exact source bytes and ingestion-event integrity.
+Controls exact bytes and receipt-event integrity.
 
 ### Contract boundary
 
-Controls intrinsic file-level validity: required values, types, vocabularies, dates, ranges, and units.
+Controls intrinsic row validity: expected columns, required values, types, vocabularies, temporal order, units, and ranges.
 
-### Migration boundary
+### Registry boundary
 
-Controls database schema history: ordering, checksums, current version, no unmanaged drift, and concurrency.
-
-### History boundary
-
-Controls whether normalized records are snapshots or immutable events, and how duplicate identities are treated.
+Converts validated strings into Python/PostgreSQL types and supplies dataset-specific SQL.
 
 ### PostgreSQL boundary
 
-Controls primary keys, foreign keys, constraints, triggers, hashes, and transaction rollback.
+Controls foreign keys, constraints, normalized record hashes, SCD2 transitions, event immutability, and transaction rollback.
 
-## Reproducibility model
+A contract-valid row may still fail PostgreSQL when it references a missing parent or conflicts with an existing immutable event.
 
-A validation run records raw, contract, temporal, and quality lineage. Clinical rows record source lineage and `record_sha256`. Patient history records the run that opened each version and the run that closed it.
+## Data and lineage identities
 
-The database also records migration version, migration name, migration SHA-256, application version, execution type, timestamp, and duration.
+```text
+raw object SHA-256
+    → exact source bytes
 
-## Design trade-offs
+raw receipt UUID + SHA-256
+    → one reception event
 
-### Hybrid history rather than universal upsert
+contract path + version + SHA-256
+    → exact validation rules
 
-Patient demographics are mutable dimensions. Encounters, diagnoses, and observations are treated as events. Applying one mutation policy to both would hide domain semantics.
+run UUID
+    → one pipeline execution
 
-### Triggers rather than application-only history
+record_sha256
+    → normalized clinical business content
 
-Database triggers enforce the policy for every writer using the tables. The cost is additional PostgreSQL-specific behavior that must be tested and documented.
+cohort run UUID
+    → one analytical derivation
+```
 
-### Current table plus patient history
+These identities are deliberately separate.
 
-A separate current snapshot simplifies operational and cohort queries, while the history table preserves prior states. This is not full bitemporal modelling.
+## Migrations
 
-### Conservative event corrections
+```text
+V001 core schemas and patients
+V002 encounters, diagnoses, observations, cohorts
+V003 contract lineage
+V004 raw lineage
+V005 patient SCD2 and first immutable event policies
+V006 medications and procedures
+```
 
-Conflicting reuse of an event identifier is rejected rather than guessed. Future correction or supersession semantics require an explicit domain model.
+Applied migrations are not edited. Corrections require a new forward migration.
 
-### Forward-only migrations
+## Extension rule
 
-Reverse DDL is not automated because it may destroy data. Corrections are introduced through new migrations.
+A seventh clinical dataset requires:
 
-## Extension rules
+1. sample or source adapter;
+2. versioned contract and manifest entry;
+3. registry row builder and persistence SQL;
+4. migration and constraints;
+5. explicit history policy;
+6. contract, integration, migration, and conflict tests;
+7. documentation.
 
-A new clinical entity requires:
-
-- a versioned contract and manifest entry;
-- a registry adapter;
-- an explicit history policy;
-- a migration for tables, hashes, and enforcement;
-- tests for duplicates and conflicting identities;
-- documentation.
-
-A new history mode must not be introduced as an undocumented variation of `ON CONFLICT DO UPDATE`.
+It must not require a new validation pipeline or a parallel persistence orchestration path.
 
 ## Current limitations
 
-The platform does not yet implement:
-
-- medications and procedures;
-- tombstones or formal correction messages;
-- bitemporal valid time;
-- patient identity merge/split semantics;
-- bulk staging and `COPY`;
-- large-scale benchmarks;
-- external terminology services;
-- production observability;
-- PHI handling or certified WORM storage.
-
-The implemented history policy improves auditability but does not imply production clinical readiness.
+The platform does not yet implement terminology reference tables, external terminology validation, complete execution-state auditing, structured logging, Synthea generation, bulk `COPY`, performance benchmarks, a second cohort, attrition/missingness reports, production security controls, or PHI handling.
