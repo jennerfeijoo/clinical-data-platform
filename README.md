@@ -1,6 +1,6 @@
 # Clinical Data Platform
 
-> Status: active development toward `1.0.0` — version `0.16.0` adds reproducible, contract-aware attrition and missingness reports for two independently seeded Synthea cohorts.
+> Status: active development toward `1.0.0` — version `0.17.0` enforces at least 90% statement coverage with behavioral tests across command, orchestration, Synthea, PostgreSQL, and failure boundaries.
 
 Clinical Data Platform is a synthetic clinical data engineering project that demonstrates how healthcare-like CSV sources become auditable, terminology-linked, analysis-ready datasets.
 
@@ -47,6 +47,27 @@ Governed target merge
 Structured JSON logs observe operations. PostgreSQL stores authoritative execution states, ordered events, retries, and durable failure evidence.
 
 There is no patient-specific pipeline, no Synthea-specific persistence path, no permanent staging schema, and no monolithic schema installer.
+
+## Mandatory test coverage
+
+Version `0.17.0` makes statement coverage an executable merge condition:
+
+```text
+3,935 measured statements
+3,547 covered statements
+388 missed statements
+90.14% total coverage
+142 tests passed
+required minimum: 90%
+```
+
+A normal `python -m pytest` run executes pytest-cov and fails when total package coverage falls below 90%. The milestone adds behavioral tests for the primary CLI, cohort CLI, benchmark CLI, demo orchestration, logging entrypoint, Synthea profile governance, source-artifact validation, external command failures, Git checkout state, and Java version guards.
+
+The percentage is a regression barrier, not evidence of clinical correctness, complete security, production capacity, or PHI readiness.
+
+Technical policy: [`docs/testing-coverage.md`](docs/testing-coverage.md).
+
+Spanish guide: [`docs/learning/cobertura-pruebas-90-es.md`](docs/learning/cobertura-pruebas-90-es.md).
 
 ## Two reproducible Synthea cohorts
 
@@ -342,7 +363,7 @@ V007 minimal terminology integration
 V008 execution lifecycle and durable failure audit
 ```
 
-The quality-report milestone requires no V009 because it adds verified application artifacts rather than permanent database objects.
+The coverage milestone requires no V009 because it adds tests and quality gates rather than permanent database objects.
 
 Expected state:
 
@@ -379,7 +400,7 @@ clinical-data-cohort list-profiles
 clinical-data-cohort quality-report --help
 python -m ruff check .
 python -m mypy src
-python -m pytest --cov=clinical_data_platform --cov-report=term-missing
+python -m pytest
 docker build --tag clinical-data-platform:local .
 ```
 
@@ -399,6 +420,7 @@ Normal CI uses small checked-in fixtures for both Synthea cohorts. The full Java
 - two matched-design independently seeded Synthea profiles;
 - identifier-disjoint cohort comparison and separate load lineage;
 - reproducible attrition, omission-reason, missingness, and completeness reports;
+- mandatory statement coverage of at least 90% with behavioral command and failure-path tests;
 - PostgreSQL COPY loading with typed staging;
 - correctness-gated loading benchmark;
 - versioned hypertension cohort and feature export;
@@ -406,6 +428,8 @@ Normal CI uses small checked-in fixtures for both Synthea cohorts. The full Java
 
 ## Documentation
 
+- [`docs/testing-coverage.md`](docs/testing-coverage.md): mandatory coverage policy, evidence, and limits;
+- [`docs/learning/cobertura-pruebas-90-es.md`](docs/learning/cobertura-pruebas-90-es.md): Spanish testing and coverage guide;
 - [`docs/attrition-missingness.md`](docs/attrition-missingness.md): quality-report definitions, artifacts, and limits;
 - [`docs/synthea-cohorts.md`](docs/synthea-cohorts.md): two-cohort protocol and boundaries;
 - [`docs/synthea.md`](docs/synthea.md): generation and adaptation;
@@ -424,13 +448,12 @@ Normal CI uses small checked-in fixtures for both Synthea cohorts. The full Java
 
 The repository is not yet version `1.0.0`. Remaining milestones include:
 
-- coverage of at least 90%;
 - multi-version Python CI;
 - dependency and security scanning;
 - non-root container hardening;
 - final documentation and release `1.0.0`.
 
-The two-cohort load is not one global transaction. Contract validation still materializes the complete source dataset. The full Synthea generator is not executed in normal CI. Attrition is row-level technical exclusion, not participant follow-up. Missingness classification does not establish MCAR, MAR, or MNAR. The benchmark measures initial single-writer loading, not production capacity. The logging layer has no centralized transport or OpenTelemetry.
+The two-cohort load is not one global transaction. Contract validation still materializes the complete source dataset. The full Synthea generator is not executed in normal CI. Attrition is row-level technical exclusion, not participant follow-up. Missingness classification does not establish MCAR, MAR, or MNAR. The benchmark measures initial single-writer loading, not production capacity. The logging layer has no centralized transport or OpenTelemetry. Coverage is statement coverage and does not prove clinical validity, security, or absence of defects.
 
 ## License
 
