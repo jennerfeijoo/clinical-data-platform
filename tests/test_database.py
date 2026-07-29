@@ -9,9 +9,9 @@ from clinical_data_platform.database import (
     apply_schema,
     connect_database,
     database_url_from_environment,
-    persist_patient_validation_outputs,
+    persist_dataset_validation_outputs,
 )
-from clinical_data_platform.pipeline import run_patient_validation
+from clinical_data_platform.pipeline import run_dataset_validation
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_DATASET = REPOSITORY_ROOT / "data" / "sample" / "patients.csv"
@@ -35,9 +35,10 @@ def test_missing_database_url_is_reported(monkeypatch: pytest.MonkeyPatch) -> No
 
 @pytest.mark.integration
 @pytest.mark.skipif(DATABASE_URL is None, reason="DATABASE_URL is not configured")
-def test_validation_outputs_are_persisted_transactionally(tmp_path: Path) -> None:
+def test_registered_dataset_is_persisted_transactionally(tmp_path: Path) -> None:
     assert DATABASE_URL is not None
-    validation_summary = run_patient_validation(
+    validation_summary = run_dataset_validation(
+        "patients",
         SAMPLE_DATASET,
         tmp_path,
         reference_date=date(2026, 7, 29),
@@ -45,11 +46,16 @@ def test_validation_outputs_are_persisted_transactionally(tmp_path: Path) -> Non
 
     with connect_database(DATABASE_URL) as connection:
         apply_schema(connection, SCHEMA_PATH)
-        persistence_summary = persist_patient_validation_outputs(connection, tmp_path)
+        persistence_summary = persist_dataset_validation_outputs(
+            connection,
+            "patients",
+            tmp_path,
+        )
 
         assert persistence_summary.run_id == validation_summary.run_id
+        assert persistence_summary.dataset == "patients"
         assert persistence_summary.already_loaded is False
-        assert persistence_summary.patients_upserted == 5
+        assert persistence_summary.records_upserted == 5
         assert persistence_summary.validation_errors_inserted == 3
 
         run_count = connection.execute(
@@ -69,7 +75,11 @@ def test_validation_outputs_are_persisted_transactionally(tmp_path: Path) -> Non
         assert patient_count is not None and patient_count[0] == 5
         assert error_count is not None and error_count[0] == 3
 
-        repeated_load = persist_patient_validation_outputs(connection, tmp_path)
+        repeated_load = persist_dataset_validation_outputs(
+            connection,
+            "patients",
+            tmp_path,
+        )
         assert repeated_load.already_loaded is True
-        assert repeated_load.patients_upserted == 0
+        assert repeated_load.records_upserted == 0
         assert repeated_load.validation_errors_inserted == 0
