@@ -14,8 +14,10 @@ ALTER TABLE audit.pipeline_runs
     ADD COLUMN failure_message TEXT,
     ADD COLUMN failure_code TEXT,
     ADD COLUMN failure_details JSONB,
-    ADD COLUMN journal_event_count INTEGER NOT NULL DEFAULT 0,
-    ADD COLUMN journal_head_sha256 CHAR(64),
+    ADD COLUMN local_journal_event_count INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN local_journal_head_sha256 CHAR(64),
+    ADD COLUMN audit_event_count INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN audit_head_sha256 CHAR(64),
     ADD COLUMN audit_gap_reason TEXT,
     ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
 
@@ -59,11 +61,26 @@ ALTER TABLE audit.pipeline_runs
     ADD CONSTRAINT pipeline_runs_attempt_count_nonnegative CHECK (
         attempt_count >= 0
     ),
-    ADD CONSTRAINT pipeline_runs_journal_event_count_nonnegative CHECK (
-        journal_event_count >= 0
+    ADD CONSTRAINT pipeline_runs_local_journal_count_nonnegative CHECK (
+        local_journal_event_count >= 0
     ),
-    ADD CONSTRAINT pipeline_runs_journal_head_shape CHECK (
-        journal_head_sha256 IS NULL OR length(btrim(journal_head_sha256)) = 64
+    ADD CONSTRAINT pipeline_runs_audit_count_nonnegative CHECK (
+        audit_event_count >= 0
+    ),
+    ADD CONSTRAINT pipeline_runs_local_journal_head_shape CHECK (
+        local_journal_head_sha256 IS NULL
+        OR length(btrim(local_journal_head_sha256)) = 64
+    ),
+    ADD CONSTRAINT pipeline_runs_audit_head_shape CHECK (
+        audit_head_sha256 IS NULL OR length(btrim(audit_head_sha256)) = 64
+    ),
+    ADD CONSTRAINT pipeline_runs_local_journal_pair CHECK (
+        (local_journal_event_count = 0 AND local_journal_head_sha256 IS NULL)
+        OR (local_journal_event_count > 0 AND local_journal_head_sha256 IS NOT NULL)
+    ),
+    ADD CONSTRAINT pipeline_runs_audit_pair CHECK (
+        (audit_event_count = 0 AND audit_head_sha256 IS NULL)
+        OR (audit_event_count > 0 AND audit_head_sha256 IS NOT NULL)
     ),
     ADD CONSTRAINT pipeline_runs_failure_fields_consistent CHECK (
         (
@@ -236,6 +253,7 @@ SELECT
     run_row.status AS current_status,
     run_row.current_stage,
     run_row.attempt_count,
+    run_row.audit_gap_reason,
     event.sequence_number,
     event.attempt_number,
     event.from_status,
