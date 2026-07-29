@@ -79,6 +79,27 @@ class ExecutionJournalSummary:
     events: tuple[ExecutionEvent, ...]
 
 
+class _RecordedFailure(RuntimeError):
+    """Internal wrapper used only to reproduce stored failed-event hashes."""
+
+    def __init__(self, message: str, error_type: str | None, error_code: str | None) -> None:
+        super().__init__(message)
+        self.recorded_error_type = error_type
+        self.sqlstate = error_code
+
+
+def _exception_fields(exc: BaseException) -> tuple[str, str, str | None]:
+    if isinstance(exc, _RecordedFailure):
+        error_type = exc.recorded_error_type or "recorded.failure"
+    else:
+        error_type = f"{type(exc).__module__}.{type(exc).__qualname__}"
+    message = str(exc).strip() or type(exc).__qualname__
+    message = message[:MAX_ERROR_MESSAGE_LENGTH]
+    raw_code = getattr(exc, "sqlstate", None)
+    error_code = str(raw_code).strip() if raw_code else None
+    return error_type, message, error_code
+
+
 def _canonical_event_payload(
     *,
     run_id: UUID,
@@ -121,15 +142,6 @@ def _event_hash(payload: Mapping[str, object]) -> str:
         ensure_ascii=False,
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
-
-
-def _exception_fields(exc: BaseException) -> tuple[str, str, str | None]:
-    error_type = f"{type(exc).__module__}.{type(exc).__qualname__}"
-    message = str(exc).strip() or type(exc).__qualname__
-    message = message[:MAX_ERROR_MESSAGE_LENGTH]
-    raw_code = getattr(exc, "sqlstate", None)
-    error_code = str(raw_code).strip() if raw_code else None
-    return error_type, message, error_code
 
 
 def build_execution_event(
@@ -366,6 +378,7 @@ def _event_from_document(document: Mapping[str, object]) -> ExecutionEvent:
         isinstance(key, str) for key in details_raw
     ):
         raise ExecutionAuditError("Journal details must be a JSON object.")
+    details = {str(key): value for key, value in details_raw.items()}
     try:
         run_id = UUID(_required_string(document, "run_id"))
         occurred_at = datetime.fromisoformat(_required_string(document, "occurred_at"))
@@ -387,7 +400,7 @@ def _event_from_document(document: Mapping[str, object]) -> ExecutionEvent:
         error_type=_optional_string(document, "error_type"),
         error_message=_optional_string(document, "error_message"),
         error_code=_optional_string(document, "error_code"),
-        details=dict(details_raw),
+        details=details,
     )
 
 
@@ -469,24 +482,3 @@ def read_execution_journal(path: Path) -> ExecutionJournalSummary:
         failed_at=failed_at,
         events=tuple(events),
     )
-
-
-class _RecordedFailure(RuntimeError):
-    """Internal exception wrapper used only to reproduce stored event hashes."""
-
-    def __init__(self, message: str, error_type: str | None, error_code: str | None) -> None:
-        super().__init__(message)
-        self.recorded_error_type = error_type
-        self.sqlstate = error_code
-
-
-def _exception_fields(exc: BaseException) -> tuple[str, str, str | None]:
-    if isinstance(exc, _RecordedFailure):
-        error_type = exc.recorded_error_type or "recorded.failure"
-    else:
-        error_type = f"{type(exc).__module__}.{type(exc).__qualname__}"
-    message = str(exc).strip() or type(exc).__qualname__
-    message = message[:MAX_ERROR_MESSAGE_LENGTH]
-    raw_code = getattr(exc, "sqlstate", None)
-    error_code = str(raw_code).strip() if raw_code else None
-    return error_type, message, error_code
