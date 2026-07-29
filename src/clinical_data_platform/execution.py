@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final, Mapping
+from typing import Any, Final
 from uuid import UUID
 
 EXECUTION_JOURNAL_VERSION: Final = "1.0.0"
@@ -92,6 +93,7 @@ def _validate_transition(
                 "Only the first created event may have no previous status."
             )
         return
+
     allowed = _ALLOWED_TRANSITIONS.get(from_status)
     if allowed is None or to_status not in allowed:
         raise ExecutionTransitionError(
@@ -354,6 +356,10 @@ def _event_from_document(document: Mapping[str, object]) -> ExecutionEvent:
         occurred_at = datetime.fromisoformat(_required_string(document, "occurred_at"))
     except ValueError as exc:
         raise ExecutionAuditError("Journal contains an invalid UUID or timestamp.") from exc
+
+    details: dict[str, object] = {
+        str(key): value for key, value in details_raw.items()
+    }
     return ExecutionEvent(
         journal_version=_required_string(document, "journal_version"),
         run_id=run_id,
@@ -369,16 +375,15 @@ def _event_from_document(document: Mapping[str, object]) -> ExecutionEvent:
         error_type=_optional_string(document, "error_type"),
         error_message=_optional_string(document, "error_message"),
         error_code=_optional_string(document, "error_code"),
-        details={str(key): value for key, value in details_raw.items()},
+        details=details,
     )
 
 
-def validate_execution_event_chain(
-    events: tuple[ExecutionEvent, ...],
-) -> None:
+def validate_execution_event_chain(events: tuple[ExecutionEvent, ...]) -> None:
     """Verify event identities, transitions, hashes, and chain continuity."""
     if not events:
         raise ExecutionAuditError("Execution event chain is empty.")
+
     first = events[0]
     previous: ExecutionEvent | None = None
     for event in events:
@@ -413,24 +418,31 @@ def validate_execution_event_chain(
         previous = event
 
 
+def _decode_json_line(line: str, line_number: int) -> Mapping[str, object]:
+    try:
+        raw: Any = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise ExecutionAuditError(
+            f"Execution journal line {line_number} is not valid JSON."
+        ) from exc
+    if not isinstance(raw, dict):
+        raise ExecutionAuditError(
+            f"Execution journal line {line_number} must be a JSON object."
+        )
+    if not all(isinstance(key, str) for key in raw):
+        raise ExecutionAuditError("Execution journal object keys must be strings.")
+    return {str(key): value for key, value in raw.items()}
+
+
 def read_execution_journal(path: Path) -> ExecutionJournalSummary:
     """Read and cryptographically verify an append-only execution journal."""
     if not path.exists():
         raise FileNotFoundError(f"Execution journal not found: {path}")
+
     events: list[ExecutionEvent] = []
     with path.open(encoding="utf-8") as file:
         for line_number, line in enumerate(file, start=1):
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ExecutionAuditError(
-                    f"Execution journal line {line_number} is not valid JSON."
-                ) from exc
-            if not isinstance(raw, dict):
-                raise ExecutionAuditError(
-                    f"Execution journal line {line_number} must be a JSON object."
-                )
-            events.append(_event_from_document(raw))
+            events.append(_event_from_document(_decode_json_line(line, line_number)))
 
     verified = tuple(events)
     validate_execution_event_chain(verified)
