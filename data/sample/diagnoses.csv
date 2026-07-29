@@ -1,0 +1,8 @@
+diagnosis_id,patient_id,encounter_id,code_system,diagnosis_code,diagnosis_datetime,source_system
+D001,P001,E001,ICD10,E78.5,2025-12-15T09:20:00+00:00,synthetic_ehr
+D002,P001,E002,ICD10,I10,2026-01-10T10:15:00+00:00,synthetic_ehr
+D003,P002,E004,ICD10,I10,2026-02-01T11:20:00+00:00,synthetic_ehr
+D004,P003,E006,ICD10,J45.909,2026-01-20T13:10:00+00:00,synthetic_ehr
+D005,P005,E007,ICD10,I10,2026-01-15T09:45:00+00:00,synthetic_ehr
+D006,P002,E005,ICD10,E11.9,2026-03-10T18:00:00+00:00,synthetic_ehr
+D007,P003,E006,LOCAL,,2026-01-20T13:15:00+00:00,synthetic_ehr
