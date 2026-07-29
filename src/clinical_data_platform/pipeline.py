@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -15,15 +14,8 @@ from uuid import uuid4
 from clinical_data_platform.contract import validate_records_against_contract
 from clinical_data_platform.ingestion import read_csv_records
 from clinical_data_platform.models import DatasetPipelineSummary, ValidationError
+from clinical_data_platform.raw import RAW_STORAGE_VERSION, capture_raw_source
 from clinical_data_platform.registry import get_dataset_definition
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        while chunk := file.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _write_records(
@@ -58,15 +50,17 @@ def run_dataset_validation(
     input_path: Path,
     output_directory: Path,
     *,
+    raw_root: Path,
     reference_date: date | None = None,
 ) -> DatasetPipelineSummary:
-    """Validate one dataset using the active contract selected by the manifest."""
+    """Capture and validate one dataset using the active versioned contract."""
     definition = get_dataset_definition(dataset)
     contract = definition.contract
     effective_reference_date = reference_date or date.today()
     run_id = uuid4()
-    source_sha256 = _sha256(input_path)
-    records = read_csv_records(input_path)
+
+    raw_receipt = capture_raw_source(dataset, input_path, raw_root)
+    records = read_csv_records(raw_receipt.object_path)
     result = validate_records_against_contract(
         records,
         contract,
@@ -89,7 +83,14 @@ def run_dataset_validation(
         "dataset": dataset,
         "generated_at": datetime.now(UTC).isoformat(),
         "input_path": str(input_path),
-        "input_sha256": source_sha256,
+        "input_sha256": raw_receipt.sha256,
+        "raw_storage_version": RAW_STORAGE_VERSION,
+        "raw_receipt_id": str(raw_receipt.receipt_id),
+        "raw_received_at": raw_receipt.received_at.isoformat(),
+        "raw_manifest_path": raw_receipt.manifest_relative_path,
+        "raw_manifest_sha256": raw_receipt.manifest_sha256,
+        "raw_object_path": raw_receipt.object_relative_path,
+        "raw_size_bytes": raw_receipt.size_bytes,
         "contract_path": contract.resource_path,
         "contract_version": contract.version,
         "contract_sha256": contract.sha256,
@@ -110,7 +111,12 @@ def run_dataset_validation(
         dataset=dataset,
         contract_version=contract.version,
         contract_sha256=contract.sha256,
-        source_sha256=source_sha256,
+        source_sha256=raw_receipt.sha256,
+        raw_receipt_id=raw_receipt.receipt_id,
+        raw_manifest_relative_path=raw_receipt.manifest_relative_path,
+        raw_manifest_sha256=raw_receipt.manifest_sha256,
+        raw_object_relative_path=raw_receipt.object_relative_path,
+        raw_size_bytes=raw_receipt.size_bytes,
         rows_received=result.rows_received,
         rows_valid=len(result.valid_records),
         rows_invalid=len(result.invalid_records),

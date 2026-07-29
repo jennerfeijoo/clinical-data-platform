@@ -6,19 +6,19 @@ The repository is progressing toward a portfolio-grade clinical data platform. I
 
 ## Architectural objective
 
-Dataset interfaces, schema evolution, validation, persistence, and analytical derivation must be explicit and independently reviewable.
+Source preservation, data acceptance, schema evolution, persistence, and analytical derivation must be explicit and independently reviewable.
 
 ```text
-Dataset name
+External source
+    │
+    ▼
+Immutable raw landing zone
     │
     ▼
 Active contract manifest
     │
     ▼
-Versioned TOML contract
-    │
-    ▼
-Generic contract engine
+Versioned executable contract
     │
     ▼
 Generic validation pipeline
@@ -33,34 +33,38 @@ Registry-controlled persistence
 Versioned cohort SQL
 ```
 
-The generic pipeline contains no patient-specific validation path. Database creation contains no monolithic `schema.sql` path.
+The generic pipeline contains no patient-specific path. Database creation contains no monolithic `schema.sql` path.
 
-## End-to-end data flow
+## End-to-end flow
 
 ```text
-Synthetic CSV source
+External CSV source
+        │
+        ▼
+Raw capture before parsing
+        ├── SHA-256 + byte size
+        ├── content-addressed object
+        ├── append-only receipt
+        └── atomic publication
+        │
+        ▼
+Read captured raw object
         │
         ▼
 Registry + active contract lookup
         │
         ▼
-Contract-definition validation
-        │
-        ▼
-UTF-8 ingestion and rule execution
-        │
+Contract rule execution
         ├── valid rows
         ├── invalid rows
         ├── normalized errors
-        └── source/contract quality report
+        └── quality report with raw + contract lineage
         │
         ▼
-Database migration validation
+Migration validation and pending migrations
         │
-        ├── version history
-        ├── migration checksums
-        ├── advisory lock
-        └── pending SQL migrations
+        ▼
+Raw receipt/object verification
         │
         ▼
 Contract-lineage verification
@@ -69,207 +73,129 @@ Contract-lineage verification
 Transactional PostgreSQL persistence
         │
         ▼
-Versioned cohort SQL
-        │
-        ▼
-Analysis-ready feature export
+Versioned cohort SQL and feature export
 ```
+
+## Raw storage model
+
+```text
+data/raw/
+├── objects/sha256/<prefix>/<sha256>/source.csv
+└── receipts/<dataset>/<YYYY>/<MM>/<DD>/<uuid>.json
+```
+
+Objects model byte content. Receipts model ingestion events.
+
+```text
+same bytes received twice
+        │
+        ├── one content object
+        └── two receipt manifests
+```
+
+The application writes to staging, fsyncs, and atomically publishes with a hard link. Existing final paths are never replaced. Published files are marked read-only and verified by SHA-256 before reuse.
+
+This is application-level local immutability, not certified WORM storage.
 
 ## Contract resource model
 
-Contracts are packaged resources:
-
-```text
-src/clinical_data_platform/contracts/
-├── manifest.toml
-├── patients/v1.0.0.toml
-├── encounters/v1.0.0.toml
-├── diagnoses/v1.0.0.toml
-└── observations/v1.0.0.toml
-```
-
-The manifest selects an active version. Historical contracts remain available so older validation bundles can be verified by path, version, and SHA-256.
+Contracts are packaged under `src/clinical_data_platform/contracts/`. The manifest explicitly selects an active version. Historical resources remain available for verification by path, semantic version, and SHA-256.
 
 ## Migration resource model
-
-Database evolution is represented by packaged SQL migrations:
 
 ```text
 src/clinical_data_platform/migrations/
 ├── V001__create_core_clinical_schema.sql
 ├── V002__add_longitudinal_entities_and_cohorts.sql
-└── V003__add_contract_lineage.sql
+├── V003__add_contract_lineage.sql
+└── V004__add_raw_landing_lineage.sql
 ```
 
-The migration history is stored in:
-
-```text
-public.schema_migrations
-```
-
-This table is outside `audit` because V001 is responsible for creating the `audit` schema.
+History is stored in `public.schema_migrations`. V004 adds receipt and raw-object lineage to `audit.pipeline_runs`.
 
 ## Core modules
 
+### `raw.py`
+
+- calculates source SHA-256 and byte size;
+- derives deterministic content paths;
+- stages and atomically publishes immutable artifacts;
+- deduplicates identical content;
+- creates append-only receipt manifests;
+- rejects path traversal;
+- verifies receipt location, object path, size, and hash.
+
+It does not parse clinical fields or connect to PostgreSQL.
+
 ### `contract.py`
 
-- parses TOML with `tomllib`;
-- validates contract consistency;
-- enforces semantic version syntax;
+- parses and validates TOML contracts;
 - computes contract SHA-256;
 - executes structural, categorical, temporal, and measurement rules;
-- returns normalized `ValidationResult` objects.
-
-It does not connect to PostgreSQL.
-
-### `migration.py`
-
-- discovers `VNNN__name.sql` resources;
-- verifies contiguous ordering and unique names;
-- calculates migration SHA-256;
-- detects known legacy schema states;
-- validates applied history;
-- acquires a PostgreSQL advisory transaction lock;
-- applies pending migrations transactionally;
-- records execution metadata;
-- supports explicit baseline and target-version operations;
-- rejects downgrades, partial legacy schemas, and checksum drift.
-
-It does not load clinical datasets.
-
-### `models.py`
-
-Defines normalized cross-dataset structures:
-
-- `ValidationError`;
-- `ValidationResult`;
-- `DatasetPipelineSummary`.
-
-### `registry.py`
-
-Defines runtime behavior that is intentionally not free-form configuration:
-
-- typed row conversion;
-- PostgreSQL upsert SQL.
-
-Columns and primary keys come from active contracts rather than duplicated Python constants.
+- returns normalized validation results.
 
 ### `pipeline.py`
 
-Implements the invariant validation workflow:
+`run_dataset_validation(...)` now enforces this order:
 
-```python
-run_dataset_validation(...)
+```text
+capture raw
+→ read raw object
+→ execute contract
+→ write quality outputs
 ```
 
-It loads the contract, hashes the source, ingests CSV, executes rules, writes valid and invalid rows, writes normalized errors, and records source/contract lineage.
+The external source path is metadata. The raw object is the validation input.
+
+### `migration.py`
+
+- discovers contiguous SQL migrations;
+- validates immutable checksums and recorded history;
+- recognizes complete V001–V004 schema signatures;
+- acquires an advisory transaction lock;
+- applies pending migrations atomically;
+- supports explicit baseline and target-version testing.
+
+### `registry.py`
+
+Keeps dataset-specific row conversion and upsert SQL outside the generic pipeline.
 
 ### `database.py`
 
-Implements dataset persistence:
+Before persistence it verifies:
 
-```python
-persist_dataset_validation_outputs(...)
-```
+1. generated output counts;
+2. historical contract path, version, and hash;
+3. raw storage version;
+4. receipt UUID, timestamp, and manifest hash;
+5. content-addressed object path;
+6. raw object size and SHA-256.
 
-It verifies generated counts and historical contract lineage, converts rows through the registry, stores run metadata and errors, performs upserts, and commits atomically.
-
-It does not create or alter database tables.
+Only then does it open the write transaction.
 
 ### `demo.py`
 
-Coordinates:
-
-```text
-migrate
-→ validate datasets
-→ persist datasets
-→ build cohort
-→ export features
-```
+Coordinates raw capture, validation, migration, persistence, cohort construction, and export for all registered datasets.
 
 ## Validation boundaries
 
-### Contract engine
+### Raw boundary
 
-Handles intrinsic file-level rules:
+Controls exact source bytes and ingestion-event integrity.
 
-```text
-required_column
-unexpected_column
-required_value
-unique
-allowed_values
-iso_date
-iso_datetime
-numeric
-not_in_future
-temporal_consistency
-unit_consistency
-plausible_range
-```
+### Contract boundary
 
-### Migration engine
+Controls intrinsic file-level validity: required values, types, vocabularies, dates, ranges, and units.
 
-Handles database-history rules:
+### Migration boundary
 
-```text
-contiguous migration versions
-immutable migration checksums
-known current version
-no unmanaged schema drift
-no downgrade
-explicit baseline
-single concurrent migrator
-```
+Controls database schema history: ordering, checksums, current version, no unmanaged drift, and concurrency.
 
-### PostgreSQL
+### PostgreSQL boundary
 
-Handles relational integrity:
+Controls relational integrity: primary keys, foreign keys, constraints, and transactions.
 
-- primary keys;
-- foreign keys;
-- check constraints;
-- transactional consistency.
-
-## Migration lifecycle
-
-### Fresh install
-
-```text
-empty database
-→ create migration history
-→ V001
-→ V002
-→ V003
-```
-
-### Managed upgrade
-
-```text
-current V001
-→ validate V001 checksum
-→ apply V002
-→ apply V003
-```
-
-### Legacy baseline
-
-```text
-recognized existing schema
-+
-no migration history
-→ explicit --baseline-existing
-→ register equivalent versions as baseline
-```
-
-Partial or unknown structures are rejected.
-
-## Transaction and concurrency model
-
-All pending migrations and their history rows are applied within a PostgreSQL transaction. An advisory transaction lock prevents two cooperating processes from migrating the same database concurrently.
-
-If SQL execution fails, its migration-history insertion is rolled back with it.
+These boundaries overlap defensively but have distinct responsibilities.
 
 ## Reproducibility model
 
@@ -277,30 +203,26 @@ A validation run records:
 
 ```text
 run UUID
-source path
-source SHA-256
-contract path
-contract semantic version
-contract SHA-256
+external source path
+raw receipt UUID
+raw received timestamp
+raw receipt path + SHA-256
+raw object path + SHA-256 + byte size
+contract path + semantic version + SHA-256
 reference date
 generation timestamp
 ```
 
-A database records:
-
-```text
-migration version
-migration name
-migration SHA-256
-application version
-execution type
-application timestamp
-execution duration
-```
-
-Contract version communicates data-interface compatibility. Contract hash identifies exact validation bytes. Migration version communicates schema order. Migration hash identifies exact DDL bytes.
+The database also records migration version, migration name, migration SHA-256, application version, execution type, timestamp, and duration.
 
 ## Interface layer
+
+Raw commands:
+
+```text
+clinical-data raw-capture
+clinical-data raw-verify
+```
 
 Contract commands:
 
@@ -327,58 +249,51 @@ clinical-data build-hypertension-cohort
 clinical-data run-demo
 ```
 
-Loading, cohort construction, and the demo apply pending migrations before writing.
-
 ## Design trade-offs
 
-### Purpose-built SQL migrator
+### Filesystem rather than object storage
 
-The project uses explicit SQL and psycopg without an ORM. A small migrator keeps DDL visible and avoids introducing ORM-oriented migration tooling solely to execute SQL files.
+The project uses a local filesystem so the architecture can be reviewed and executed without cloud infrastructure. A production implementation would likely use versioned object storage, retention policies, IAM, encryption, and external backups.
 
-The cost is ownership of discovery, locking, history validation, baseline detection, and checksum policy. A larger multi-service environment may justify Alembic, Flyway, or Liquibase.
+### Content addressing rather than filename addressing
+
+A filename is operational metadata and may repeat. SHA-256 identifies the actual bytes, enables deterministic deduplication, and exposes corruption.
+
+### Receipt separate from object
+
+Content identity and receipt events have different cardinalities. Separating them avoids duplicating bytes while retaining every ingestion event.
 
 ### Forward-only migrations
 
-Downgrades are not automated because reverse DDL can destroy data. Corrections are introduced as new forward migrations. Operational rollback would rely on backup/restore or an explicit compatibility strategy.
+Reverse DDL is not automated because it may destroy data. Corrections are introduced through new migrations.
 
 ### Contracts and migrations remain separate
 
-Contracts define accepted source data. Migrations define database structure. A contract version change does not automatically generate DDL, and a migration does not redefine source validation semantics.
-
-### SQL remains controlled code
-
-Contracts do not contain arbitrary persistence SQL. The registry and migrations keep database-changing operations reviewable as application-controlled code.
+Contracts define accepted source data. Migrations define database structure. Neither is generated implicitly from the other.
 
 ## Extension rules
 
-A new dataset requires:
+A new source format requires:
 
-- a versioned contract;
-- a manifest entry;
-- a registry persistence adapter;
-- a new database migration when storage changes;
-- tests;
-- documentation.
+- a documented media type and storage-version compatibility decision;
+- deterministic object naming;
+- a safe parser after raw capture;
+- tests for capture, deduplication, verification, and corruption;
+- no weakening of existing receipt verification.
 
-A new schema change requires:
-
-- the next contiguous migration file;
-- fresh-install testing;
-- upgrade testing from the previous version;
-- code compatibility changes;
-- no edits to previously applied migrations.
+A new dataset still requires a contract, manifest entry, registry adapter, migration when necessary, tests, and documentation. It must not require changes to the invariant validation or persistence algorithm.
 
 ## Current limitations
 
 The platform does not yet implement:
 
-- immutable raw storage;
 - historical clinical-record versioning;
 - large-scale loading and benchmarks;
 - external terminology services;
 - production observability;
-- authentication;
+- enterprise authentication;
 - PHI handling;
-- automated backup or restore workflows.
+- certified WORM storage;
+- automated backup and restore.
 
-Formal migrations and executable contracts improve reproducibility and maintainability but do not imply production clinical readiness.
+Immutable raw capture, executable contracts, and formal migrations improve reproducibility but do not imply production clinical readiness.

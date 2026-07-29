@@ -2,139 +2,93 @@
 
 ## Propósito
 
-Esta guía explica cómo el repositorio dejó de crear la base de datos mediante un único archivo `schema.sql` y pasó a utilizar migraciones ordenadas, inmutables y auditables.
+Esta guía explica cómo la base evoluciona mediante migraciones SQL ordenadas, inmutables y auditables. Debes poder distinguir instalación, upgrade, baseline, drift y rollback operacional.
 
-El objetivo no es memorizar comandos. Debes poder explicar:
+## 1. Por qué no basta un `schema.sql`
 
-- por qué un esquema monolítico deja de ser suficiente;
-- qué diferencia existe entre instalar y actualizar una base de datos;
-- cómo se determina qué migraciones ya fueron aplicadas;
-- por qué se almacenan checksums;
-- por qué el baseline exige una decisión explícita;
-- cómo detectar drift entre el código y la base;
-- qué ocurre si una migración falla;
-- cómo añadir una nueva migración sin alterar las anteriores.
+Un archivo monolítico mezcla normalmente:
 
-## 1. Problema anterior
-
-El proyecto utilizaba:
-
-```text
-sql/schema.sql
-```
-
-Ese archivo contenía simultáneamente:
-
-- creación inicial de schemas y tablas;
-- `ALTER TABLE` para bases antiguas;
-- backfills de columnas nuevas;
+- creación inicial;
+- `ALTER TABLE`;
+- backfills;
 - índices;
-- lógica de compatibilidad.
+- compatibilidad histórica.
 
-El archivo era idempotente en varios puntos mediante `IF NOT EXISTS`, pero no respondía bien estas preguntas:
+Puede ser parcialmente idempotente, pero no responde con precisión:
 
 ```text
 ¿Qué versión tiene esta base?
-¿Qué cambios se aplicaron realmente?
-¿En qué orden se aplicaron?
-¿El SQL aplicado coincide todavía con Git?
-¿Una instalación nueva y una actualización recorrieron el mismo camino?
+¿Qué cambios se aplicaron?
+¿En qué orden?
+¿El SQL actual coincide con el aplicado?
+¿Se probó realmente el upgrade?
 ```
 
-Reejecutar un esquema completo tampoco equivale a gestionar evolución. Puede ocultar estados intermedios, tolerar objetos creados manualmente o dificultar la reproducción de una actualización histórica.
+Por eso `sql/schema.sql` fue eliminado.
 
-## 2. Modelo nuevo
-
-La base evoluciona mediante recursos SQL numerados:
+## 2. Historia actual
 
 ```text
 src/clinical_data_platform/migrations/
 ├── V001__create_core_clinical_schema.sql
 ├── V002__add_longitudinal_entities_and_cohorts.sql
-└── V003__add_contract_lineage.sql
+├── V003__add_contract_lineage.sql
+└── V004__add_raw_landing_lineage.sql
 ```
 
-El nombre sigue el patrón:
+Patrón obligatorio:
 
 ```text
 VNNN__descripcion_en_snake_case.sql
 ```
 
-Ejemplo:
+Las versiones deben comenzar en V001 y ser contiguas.
 
-```text
-V003__add_contract_lineage.sql
-```
-
-Significa:
-
-```text
-V003                 versión ordenada
-__                   separador obligatorio
-add_contract_lineage nombre descriptivo
-.sql                  migración SQL
-```
-
-La secuencia debe comenzar en `V001` y ser contigua. No se permite:
-
-```text
-V001
-V003
-```
-
-sin `V002`.
-
-## 3. Qué representa cada migración
+## 3. Qué representa cada versión
 
 ### V001
 
-Crea el núcleo original:
-
-- schemas `clinical`, `audit` y `analytics`;
-- `audit.pipeline_runs`;
-- `clinical.patients`;
-- `audit.validation_errors`;
-- índices básicos.
+Crea schemas, ejecuciones básicas, pacientes y errores.
 
 ### V002
 
-Amplía la plataforma longitudinal:
-
-- añade `entity_id` a los errores;
-- crea encuentros;
-- crea diagnósticos;
-- crea observaciones;
-- crea lineage de cohortes;
-- crea la tabla analítica de hipertensión;
-- añade índices clínicos.
+Añade encuentros, diagnósticos, observaciones, cohortes, tabla analítica e índices longitudinales.
 
 ### V003
 
 Añade lineage contractual:
 
-- `contract_path`;
-- `contract_version`;
-- `contract_sha256`;
-- backfill explícito para filas históricas;
-- índice por dataset y versión contractual.
-
-La división permite reproducir una actualización real:
-
 ```text
-V001 → V002 → V003
+contract_path
+contract_version
+contract_sha256
 ```
 
-Una base nueva y una base antigua terminan en la misma versión, pero no parten del mismo estado.
+### V004
+
+Añade lineage de la landing zone raw:
+
+```text
+raw_receipt_id
+raw_received_at
+raw_storage_version
+raw_manifest_path
+raw_manifest_sha256
+raw_object_path
+raw_size_bytes
+```
+
+Las filas anteriores reciben marcadores explícitos `legacy/unmanaged`. No se inventan receipts históricos.
 
 ## 4. Tabla de historial
 
-El motor crea:
+El motor utiliza:
 
 ```text
 public.schema_migrations
 ```
 
-La tabla registra:
+Campos:
 
 ```text
 version
@@ -146,571 +100,283 @@ execution_type
 application_version
 ```
 
-Ejemplo conceptual:
+Está en `public` porque V001 crea el schema `audit`; colocar anticipadamente el historial dentro de `audit` introduciría una dependencia circular.
 
-| version | name | execution_type |
-|---:|---|---|
-| 1 | create_core_clinical_schema | migration |
-| 2 | add_longitudinal_entities_and_cohorts | migration |
-| 3 | add_contract_lineage | migration |
-
-`execution_type` puede ser:
-
-```text
-migration
-baseline
-```
-
-## 5. Por qué la tabla está en `public`
-
-La migración V001 es responsable de crear el schema `audit`.
-
-Si el motor necesitara crear `audit.schema_migrations` antes de V001, estaría modificando parte del esquema que la propia V001 pretende crear. Para evitar esa dependencia circular, el historial técnico del migrador vive en:
-
-```text
-public.schema_migrations
-```
-
-Mientras que el lineage de datos y cohortes vive en:
-
-```text
-audit.*
-```
-
-## 6. Descubrimiento de migraciones
+## 5. Descubrimiento
 
 `discover_migrations()`:
 
-1. inspecciona los recursos empaquetados;
-2. filtra nombres válidos;
+1. inspecciona recursos empaquetados;
+2. valida nombres;
 3. extrae versión y nombre;
-4. lee los bytes;
-5. calcula SHA-256;
-6. ordena por versión;
-7. verifica que la secuencia sea contigua;
-8. verifica que no haya nombres duplicados.
+4. calcula SHA-256;
+5. ordena;
+6. exige secuencia contigua;
+7. rechaza nombres duplicados.
 
-Cada migración se representa mediante:
+La migración es un objeto con versión, nombre, ruta, checksum y SQL.
 
-```python
-Migration(
-    version=3,
-    name="add_contract_lineage",
-    resource_path="V003__add_contract_lineage.sql",
-    checksum="...",
-    sql="...",
-)
-```
+## 6. Inmutabilidad por checksum
 
-## 7. Checksum e inmutabilidad
+Al aplicar una migración, PostgreSQL almacena el SHA-256 de sus bytes exactos.
 
-Cuando una migración se aplica, su SHA-256 queda almacenado.
-
-En ejecuciones posteriores el motor compara:
+En ejecuciones posteriores:
 
 ```text
-checksum del archivo empaquetado
-vs.
-checksum guardado en PostgreSQL
+checksum empaquetado == checksum registrado
 ```
 
-Si difieren, se genera `MigrationChecksumError`.
+Si difieren, se lanza `MigrationChecksumError`.
 
-Esto impone una regla:
+Regla:
 
-> Una migración aplicada no se edita. Se crea una migración nueva.
+> Una migración aplicada no se edita. Se crea la siguiente versión.
 
-Incorrecto:
+Ahora que V004 existe, una corrección nueva sería, por ejemplo:
 
 ```text
-Modificar V002 después de que fue aplicada
+V005__correct_raw_lineage_constraint.sql
 ```
 
-Correcto:
+No debe modificarse V004.
+
+## 7. Transacción y advisory lock
+
+`migrate_database()` ejecuta:
 
 ```text
-Crear V004__correct_observation_constraint.sql
-```
-
-El checksum no demuestra que el SQL sea correcto. Demuestra que el archivo actual coincide con el que se registró al aplicarlo.
-
-## 8. Aplicación transaccional
-
-`migrate_database()` ejecuta las migraciones dentro de una transacción PostgreSQL.
-
-La secuencia es:
-
-```text
-adquirir advisory lock
-→ detectar estado existente
-→ crear tabla de historial
-→ validar historial
+advisory lock
+→ detectar estructura
+→ crear/leer historial
+→ validar checksums
 → ejecutar SQL pendiente
-→ insertar registro de migración
+→ registrar historia
 → commit
 ```
 
-Si una migración falla:
+Si una migración falla, su DDL y su fila de historial se revierten juntos.
 
-```text
-DDL pendiente
-+
-registro de historial pendiente
-```
+El advisory lock evita que dos procesos cooperantes migren simultáneamente la misma base.
 
-se revierten juntos.
+## 8. Estado, migración y validación
 
-Por tanto, una migración no debe quedar registrada como aplicada si su SQL no terminó correctamente.
-
-## 9. Advisory lock
-
-El motor ejecuta:
-
-```text
-pg_advisory_xact_lock(...)
-```
-
-El objetivo es impedir que dos procesos intenten migrar simultáneamente la misma base.
-
-Sin bloqueo podrían ocurrir carreras como:
-
-```text
-Proceso A lee current_version = 2
-Proceso B lee current_version = 2
-A aplica V003
-B intenta aplicar V003
-```
-
-El advisory lock serializa esa sección crítica durante la transacción.
-
-No reemplaza permisos de base ni coordinación operacional. Controla concurrencia entre procesos que respetan el mismo lock.
-
-## 10. Estado y validación
-
-### Estado
+Estado:
 
 ```powershell
 clinical-data database-status
 ```
 
-Informa:
+Migración:
 
-```text
-managed
-detected
-current
-latest
-pending
+```powershell
+clinical-data database-migrate
 ```
 
-Distinción importante:
-
-```text
-current  = versión registrada en schema_migrations
-latest   = versión más alta empaquetada
-pending  = migraciones posteriores a current
-```
-
-### Validación
+Validación estricta:
 
 ```powershell
 clinical-data database-validate
 ```
 
-Comprueba:
+Conceptos:
 
-- secuencia aplicada contigua;
-- nombres coincidentes;
-- checksums coincidentes;
-- estructura detectada no inferior al historial;
-- estructura detectada no superior al historial;
-- ausencia de migraciones pendientes.
-
-### Migración
-
-```powershell
-clinical-data database-migrate
+```text
+current  = última versión registrada
+latest   = versión más alta empaquetada
+pending  = versiones posteriores a current
+detected = estructura reconocida físicamente
 ```
 
-Aplica todas las migraciones pendientes.
+`current` y `detected` deben ser coherentes.
 
-También puede detenerse en una versión:
-
-```powershell
-clinical-data database-migrate --target-version 1
-```
-
-Esto se usa principalmente para pruebas de upgrade.
-
-## 11. Instalación nueva
+## 9. Instalación nueva
 
 En una base vacía:
 
 ```text
-detected_schema_version = 0
-history = inexistente
+0 → V001 → V002 → V003 → V004
 ```
 
-El motor:
-
-1. crea `public.schema_migrations`;
-2. aplica V001;
-3. aplica V002;
-4. aplica V003;
-5. registra cada una como `migration`.
-
-Una segunda ejecución no aplica nada.
-
-Esto es idempotencia a nivel de historial, no reejecución indiscriminada de todos los SQL.
-
-## 12. Upgrade gestionado
-
-Ejemplo:
-
-```powershell
-clinical-data database-migrate --target-version 1
-clinical-data database-status
-clinical-data database-migrate
-```
-
-Después del primer comando:
+Cada versión se registra como:
 
 ```text
-current = 1
-pending = [2, 3]
+execution_type = migration
 ```
 
-Después del segundo:
+Una segunda ejecución no repite el SQL.
+
+## 10. Upgrade gestionado
+
+Para probar específicamente V003 → V004:
+
+```powershell
+clinical-data database-migrate --target-version 3
+clinical-data database-status
+clinical-data database-migrate
+clinical-data database-validate
+```
+
+Estado intermedio esperado:
 
 ```text
 current = 3
-pending = []
+latest = 4
+pending = [4]
 ```
 
-Las pruebas verifican que una columna introducida en V003 no exista en V001 y aparezca después del upgrade.
+Antes de V004, `audit.pipeline_runs.raw_receipt_id` no existe. Después, deben existir los siete campos raw.
 
-## 13. Baseline de una base existente
+Esto prueba el camino de actualización, no solo una instalación nueva.
 
-Una base creada antes del migrador puede tener todas las tablas pero no `schema_migrations`.
+## 11. Baseline
 
-El motor no la adopta automáticamente. Sin autorización explícita produce un error.
+Una base creada antes del historial puede contener una estructura completa conocida.
 
-Después de revisar la estructura:
+El motor no la adopta automáticamente. Tras revisión explícita:
 
 ```powershell
 clinical-data database-migrate --baseline-existing
 ```
 
-El motor reconoce únicamente estados completos conocidos:
-
-```text
-estado equivalente a V001
-estado equivalente a V002
-estado equivalente a V003
-```
-
-Luego registra esas versiones como:
+Las versiones equivalentes se registran como:
 
 ```text
 execution_type = baseline
 ```
 
-Baseline significa:
+Baseline significa que la estructura ya existía y fue reconocida; no significa que el SQL histórico se ejecutó.
 
-> El sistema reconoce que la estructura ya existía y registra su equivalencia histórica sin volver a ejecutar esas migraciones.
+Los estados parciales se rechazan. Para V004, tener solo algunos campos raw es un estado parcial.
 
-No significa:
+## 12. Por qué baseline debe ser explícito
 
-> Cualquier base parecida es segura.
+Sin confirmación, una estructura modificada manualmente podría declararse falsamente equivalente a una versión oficial. La bandera obliga al operador a asumir y documentar esa decisión.
 
-Si detecta un estado parcial, se niega a baselinar.
+## 13. Downgrades
 
-## 14. Por qué el baseline es explícito
-
-Un baseline automático podría transformar este estado:
-
-```text
-algunas tablas existen
-algunas columnas fueron modificadas manualmente
-no hay historial fiable
-```
-
-En una afirmación falsa:
-
-```text
-V003 aplicada correctamente
-```
-
-La bandera explícita obliga al operador a reconocer que está adoptando una base heredada.
-
-## 15. Downgrades
-
-El motor no implementa migraciones descendentes.
-
-Esto es deliberado. Revertir DDL puede implicar pérdida de datos:
+El motor es forward-only. No automatiza:
 
 ```text
 DROP COLUMN
 DROP TABLE
-cambio de tipo incompatible
+reversión de tipos
 ```
 
-La estrategia actual es forward-only:
+Una reversión operacional puede requerir backup/restore, despliegue compatible, migración correctiva o estrategia expand/contract.
 
-```text
-V003 con problema
-→ crear V004 correctiva
-```
+`git revert` no revierte por sí solo el estado persistente de PostgreSQL.
 
-En un sistema real, una reversión operacional puede usar:
+## 14. Drift
 
-- backup y restore;
-- despliegue compatible hacia adelante;
-- migración correctiva;
-- estrategia expand/contract.
-
-No debe confundirse `git revert` con revertir el estado persistente de PostgreSQL.
-
-## 16. Detección de drift
-
-El motor distingue dos formas principales.
-
-### Drift del archivo
+### Drift de archivo
 
 ```text
 checksum empaquetado != checksum registrado
 ```
 
-Resultado:
+### Drift estructural
 
 ```text
-MigrationChecksumError
+estructura detectada != versión registrada
 ```
 
-### Drift entre estructura e historial
+Ejemplos:
 
-Ejemplo:
+- historial dice V004, pero faltan columnas raw;
+- existen algunas columnas raw sin historia V004;
+- se editó una migración aplicada.
+
+El motor rechaza estos estados en lugar de repararlos silenciosamente.
+
+## 15. Relación con contratos y raw storage
 
 ```text
-schema_migrations dice V001
-pero ya existen objetos de V003
+contrato
+    define qué fuente es válida
+
+migración
+    define cómo evoluciona PostgreSQL
+
+raw landing
+    conserva los bytes previos a interpretación
 ```
 
-Resultado:
+V004 persiste referencias al raw, pero no implementa el almacenamiento raw. Esa responsabilidad pertenece a `raw.py`.
 
-```text
-MigrationHistoryError
-```
+Una migración de base no debe capturar archivos, y `raw.py` no debe alterar tablas.
 
-La detección actual reconoce la evolución V001–V003. Futuras migraciones que introduzcan nuevos hitos estructurales deberán ampliar también la detección de baseline.
+## 16. Pruebas
 
-## 17. Integración con el resto de la plataforma
+`tests/test_migration.py` cubre:
 
-Antes de persistir datos, los comandos ejecutan el migrador:
+- secuencia V001–V004;
+- fresh install;
+- reejecución idempotente;
+- upgrade desde V001;
+- upgrade V003 → V004;
+- baseline explícito;
+- rechazo de checksum alterado.
 
-```text
-load-dataset
-build-hypertension-cohort
-run-demo
-```
+Para cada prueba, identifica qué estado inicial crea y qué invariantes verifica.
 
-El flujo es:
+## 17. Añadir V005
 
-```text
-migrate_database()
-→ persist_dataset_validation_outputs()
-→ build_hypertension_cohort()
-```
+Procedimiento:
 
-La persistencia ya no llama a `apply_schema()` y `sql/schema.sql` fue eliminado.
+1. no editar V001–V004;
+2. crear `V005__nombre.sql`;
+3. actualizar detección estructural cuando corresponda;
+4. actualizar pruebas de secuencia;
+5. añadir prueba de fresh install;
+6. añadir prueba V004 → V005;
+7. actualizar código que use el nuevo esquema;
+8. documentar backfill y compatibilidad;
+9. ejecutar Ruff, mypy, pytest y Docker.
 
-Esto evita mantener dos mecanismos para modificar la misma base.
+## 18. Preguntas de entrevista
 
-## 18. Pruebas implementadas
+### ¿Por qué guardar checksum?
 
-### Fresh install
-
-Verifica:
-
-```text
-0 → 1 → 2 → 3
-```
-
-### Reejecución
-
-Verifica que una segunda ejecución no duplique historial ni DDL.
-
-### Upgrade
-
-Verifica:
-
-```text
-V001 → V003
-```
-
-### Baseline
-
-Crea una estructura heredada sin historial, comprueba que se rechaza y luego la adopta explícitamente.
-
-### Checksum drift
-
-Altera el checksum registrado y comprueba que la validación falla.
-
-### Aislamiento
-
-Cada prueba de integración elimina:
-
-```text
-analytics
-clinical
-audit
-public.schema_migrations
-```
-
-antes y después de ejecutarse.
-
-## 19. Cómo crear V004
-
-Supón que necesitas añadir:
-
-```text
-audit.pipeline_runs.duration_ms
-```
-
-Crea:
-
-```text
-V004__add_pipeline_duration.sql
-```
-
-Contenido conceptual:
-
-```sql
-ALTER TABLE audit.pipeline_runs
-    ADD COLUMN duration_ms INTEGER;
-
-UPDATE audit.pipeline_runs
-SET duration_ms = 0
-WHERE duration_ms IS NULL;
-
-ALTER TABLE audit.pipeline_runs
-    ALTER COLUMN duration_ms SET NOT NULL,
-    ADD CONSTRAINT pipeline_runs_duration_nonnegative
-        CHECK (duration_ms >= 0);
-```
-
-Después debes:
-
-1. actualizar código que inserta la fila;
-2. actualizar pruebas;
-3. ejecutar fresh install;
-4. ejecutar upgrade desde V003;
-5. verificar checksum e historial;
-6. no editar V001–V003.
-
-## 20. Preguntas de entrevista
-
-### ¿Por qué eliminaste schema.sql?
-
-> Porque mezclaba instalación inicial y evolución histórica. Las migraciones numeradas permiten conocer el estado de cada base, aplicar solo cambios pendientes, probar upgrades y verificar que el SQL aplicado no fue alterado.
-
-### ¿Por qué usaste un migrador propio?
-
-> El proyecto usa SQL explícito y psycopg, no un ORM. Un migrador pequeño permite mantener el SQL visible y evita introducir Alembic solo para ejecutar scripts. El costo es que debemos mantener descubrimiento, locking, baseline y validación; esa decisión sería reevaluada si el sistema creciera.
-
-### ¿Por qué no editas una migración antigua?
-
-> Porque una migración aplicada forma parte del historial de la base. Editarla haría que una instalación nueva y una base existente recorrieran historias diferentes. Los checksums detectan esa divergencia.
-
-### ¿Qué diferencia hay entre baseline y migration?
-
-> `migration` indica que el motor ejecutó el SQL. `baseline` indica que una estructura existente fue revisada, reconocida como equivalente a una versión y registrada sin volver a ejecutar el SQL.
-
-### ¿Qué ocurre si V003 falla?
-
-> La ejecución de V003 y su inserción en schema_migrations están dentro de la misma transacción. PostgreSQL revierte ambas y la versión no queda marcada como aplicada.
+Para detectar que el SQL empaquetado ya no coincide con el registrado al aplicar la migración.
 
 ### ¿Por qué un advisory lock?
 
-> Para que dos instancias no calculen el mismo conjunto pendiente y modifiquen el esquema simultáneamente.
+Para serializar migradores cooperantes y evitar carreras sobre la misma versión pendiente.
 
-## 21. Ejercicios obligatorios
+### ¿Por qué no editar una migración aplicada?
+
+Porque las bases existentes no volverán a ejecutarla; se producirían historias incompatibles con el mismo número de versión.
+
+### ¿Qué diferencia hay entre migration y baseline?
+
+`migration` ejecuta SQL. `baseline` registra una equivalencia estructural ya existente tras revisión explícita.
+
+### ¿Por qué probar V003 → V004?
+
+Porque una instalación limpia no demuestra que una base existente pueda incorporar correctamente raw lineage.
+
+### ¿Por qué no hay downgrade automático?
+
+Porque el DDL inverso puede destruir datos y requiere una estrategia operacional específica.
+
+## 19. Ejercicios personales
 
 ### Ejercicio 1
 
-Ejecuta:
-
-```powershell
-clinical-data database-migrate --target-version 1
-clinical-data database-status
-```
-
-Confirma que encuentros no existe y explica por qué.
+Migra hasta V003 e inspecciona `information_schema.columns`. Luego aplica V004 y explica cada columna nueva.
 
 ### Ejercicio 2
 
-Completa el upgrade:
-
-```powershell
-clinical-data database-migrate
-clinical-data database-validate
-```
-
-Consulta:
-
-```sql
-SELECT *
-FROM public.schema_migrations
-ORDER BY version;
-```
-
-Explica cada columna.
+En una base desechable, cambia el checksum de V004 en `public.schema_migrations`. Ejecuta `database-validate` y explica el rechazo.
 
 ### Ejercicio 3
 
-Cambia temporalmente el checksum de V002 en la tabla de historial y ejecuta `database-validate`. Después restaura la base.
-
-Explica por qué cambiar el archivo y cambiar el historial son dos manipulaciones distintas.
+Diseña V005 para añadir `duration_ms` a `audit.pipeline_runs`. Incluye nullable inicial, backfill, `NOT NULL`, constraint y pruebas de upgrade.
 
 ### Ejercicio 4
 
-Dibuja de memoria:
+Crea deliberadamente una estructura con solo `raw_receipt_id`. Explica por qué el detector no debe baselinarla como V004.
 
-```text
-packaged SQL
-→ discovery
-→ checksum validation
-→ advisory lock
-→ transaction
-→ SQL execution
-→ history insert
-```
+## 20. Explicación profesional
 
-### Ejercicio 5
-
-Diseña V004 para añadir `duration_ms`, pero no la publiques hasta poder explicar:
-
-- backfill;
-- nulabilidad;
-- constraint;
-- compatibilidad del código anterior;
-- prueba de fresh install;
-- prueba de upgrade.
-
-### Ejercicio 6
-
-Argumenta cuándo sería mejor usar Alembic, Flyway o Liquibase en lugar del motor actual.
-
-## 22. Criterio de dominio personal
-
-Puedes afirmar que comprendes esta capa cuando seas capaz de:
-
-- explicar por qué `CREATE TABLE IF NOT EXISTS` no sustituye un historial;
-- distinguir fresh install, upgrade y baseline;
-- leer una migración y anticipar su efecto;
-- añadir V004 sin editar versiones antiguas;
-- interpretar un checksum mismatch;
-- diagnosticar historia adelantada o estructura adelantada;
-- explicar el papel de la transacción y el advisory lock;
-- recuperar una base de prueba después de un fallo;
-- reconocer los límites del migrador propio.
+> La plataforma utiliza migraciones SQL forward-only empaquetadas y ordenadas. PostgreSQL registra versión, nombre y SHA-256 de cada migración. El motor valida el historial, detecta estructuras conocidas, aplica versiones pendientes dentro de una transacción y utiliza un advisory lock para evitar carreras. V004 introduce lineage de la landing zone raw y está cubierta por pruebas de instalación y upgrade desde V003.

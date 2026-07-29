@@ -151,8 +151,20 @@ def _column_exists(
     return row is not None and bool(row[0])
 
 
+def _column_group_presence(
+    connection: psycopg.Connection[Any],
+    schema_name: str,
+    table_name: str,
+    columns: tuple[str, ...],
+) -> tuple[bool, ...]:
+    return tuple(
+        _column_exists(connection, schema_name, table_name, column)
+        for column in columns
+    )
+
+
 def _detect_existing_schema_version(connection: psycopg.Connection[Any]) -> int:
-    """Identify the highest complete pre-migration schema represented in the database."""
+    """Identify the highest complete platform schema represented in the database."""
     core_tables = (
         "audit.pipeline_runs",
         "audit.validation_errors",
@@ -196,9 +208,11 @@ def _detect_existing_schema_version(connection: psycopg.Connection[Any]) -> int:
         "contract_version",
         "contract_sha256",
     )
-    contract_presence = tuple(
-        _column_exists(connection, "audit", "pipeline_runs", column)
-        for column in contract_columns
+    contract_presence = _column_group_presence(
+        connection,
+        "audit",
+        "pipeline_runs",
+        contract_columns,
     )
     if any(contract_presence):
         if not all(contract_presence) or version < 2:
@@ -206,6 +220,28 @@ def _detect_existing_schema_version(connection: psycopg.Connection[Any]) -> int:
                 "The database contains partial contract-lineage columns and cannot be baselined."
             )
         version = 3
+
+    raw_columns = (
+        "raw_receipt_id",
+        "raw_received_at",
+        "raw_storage_version",
+        "raw_manifest_path",
+        "raw_manifest_sha256",
+        "raw_object_path",
+        "raw_size_bytes",
+    )
+    raw_presence = _column_group_presence(
+        connection,
+        "audit",
+        "pipeline_runs",
+        raw_columns,
+    )
+    if any(raw_presence):
+        if not all(raw_presence) or version < 3:
+            raise MigrationHistoryError(
+                "The database contains partial raw-lineage columns and cannot be baselined."
+            )
+        version = 4
     return version
 
 
