@@ -1,0 +1,43 @@
+[dataset]
+name = "patients"
+version = "1.0.0"
+primary_key = "patient_id"
+patient_id_column = "patient_id"
+allow_extra_columns = false
+
+not_future_fields = ["birth_date"]
+
+[[order_rules]]
+earlier_field = "birth_date"
+later_field = "death_date"
+
+[[columns]]
+name = "patient_id"
+type = "string"
+required = true
+unique = true
+
+[[columns]]
+name = "sex_at_birth"
+type = "string"
+required = true
+unique = false
+allowed_values = ["F", "M", "OTHER", "UNKNOWN"]
+
+[[columns]]
+name = "birth_date"
+type = "date"
+required = true
+unique = false
+
+[[columns]]
+name = "death_date"
+type = "date"
+required = false
+unique = false
+
+[[columns]]
+name = "source_system"
+type = "string"
+required = true
+unique = false
