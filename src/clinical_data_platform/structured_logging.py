@@ -25,9 +25,9 @@ MAX_LOG_MESSAGE_LENGTH: Final = 2_000
 SUPPORTED_LOG_LEVELS: Final = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 SUPPORTED_LOG_FORMATS: Final = ("json", "text")
 
-_LOG_CONTEXT: ContextVar[dict[str, object]] = ContextVar(
+_LOG_CONTEXT: ContextVar[dict[str, object] | None] = ContextVar(
     "clinical_data_platform_log_context",
-    default={},
+    default=None,
 )
 
 _SENSITIVE_FIELD_NAMES: Final = frozenset(
@@ -137,7 +137,8 @@ def safe_exception_fields(error: BaseException) -> dict[str, object]:
 
 def current_log_context() -> dict[str, object]:
     """Return a copy of the current structured context."""
-    return dict(_LOG_CONTEXT.get())
+    context = _LOG_CONTEXT.get()
+    return dict(context) if context is not None else {}
 
 
 @contextmanager
