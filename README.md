@@ -1,31 +1,36 @@
 # Clinical Data Platform
 
-> Status: active development toward `1.0.0` — version `0.5.0` adds formal, checksum-verified PostgreSQL migrations.
+> Status: active development toward `1.0.0` — version `0.6.0` adds an immutable, content-addressed raw landing zone.
 
-Clinical Data Platform is a synthetic clinical data engineering project that demonstrates the path from healthcare-like source records to an auditable analysis-ready dataset.
+Clinical Data Platform is a synthetic clinical data engineering project that demonstrates how healthcare-like source files can become auditable, analysis-ready datasets.
 
-The repository uses only synthetic data. It is intended for engineering review and learning, not for identifiable patient data, clinical decision-making, or production healthcare use.
+The repository uses only synthetic data. It is intended for engineering review and learning, not for identifiable patient data, clinical decisions, or production healthcare deployment.
 
-## Current architecture
-
-The platform separates four concerns:
+## Architecture
 
 ```text
-Versioned TOML contracts
+External CSV source
+        │
+        ▼
+Immutable raw capture
+        ├── SHA-256 content object
+        └── append-only receipt manifest
+        │
+        ▼
+Versioned executable TOML contract
         │
         ▼
 Generic validation pipeline
-        │
         ├── valid rows
         ├── quarantined rows
         ├── normalized errors
-        └── source + contract lineage
+        └── quality report
         │
         ▼
 Formal PostgreSQL migrations
         │
         ▼
-Registry-controlled persistence
+Generic transactional persistence
         │
         ▼
 Versioned cohort SQL and feature export
@@ -33,84 +38,86 @@ Versioned cohort SQL and feature export
 
 There is no patient-specific pipeline and no monolithic schema installer.
 
-## Executable data contracts
+## Immutable raw landing zone
 
-Active contracts are selected explicitly by:
+Sources are captured before parsing under:
+
+```text
+data/raw/
+├── objects/
+│   └── sha256/<prefix>/<sha256>/source.csv
+└── receipts/
+    └── <dataset>/<YYYY>/<MM>/<DD>/<receipt-uuid>.json
+```
+
+The object path is derived from the file bytes. Identical files share one object, while every receipt event receives its own append-only manifest.
+
+The landing implementation provides:
+
+- SHA-256 and byte-size verification;
+- content-based deduplication;
+- staging plus atomic publication;
+- no replacement of existing final paths;
+- local read-only permissions;
+- receipt and object integrity verification;
+- path traversal protection;
+- validation from the captured raw object rather than the external source;
+- PostgreSQL lineage for the raw receipt and object.
+
+Local read-only permissions are not equivalent to certified WORM storage. The project does not claim protection from administrators, regulatory retention, object-store durability, or production PHI controls.
+
+## Executable contracts
+
+Active contract versions are selected by:
 
 ```text
 src/clinical_data_platform/contracts/manifest.toml
 ```
 
-Published versions are retained:
+Published contracts are retained:
 
 ```text
 src/clinical_data_platform/contracts/
-├── manifest.toml
 ├── patients/v1.0.0.toml
 ├── encounters/v1.0.0.toml
 ├── diagnoses/v1.0.0.toml
 └── observations/v1.0.0.toml
 ```
 
-The contract engine executes:
+The contract engine executes structural, required-value, uniqueness, type, vocabulary, temporal, unit, and plausible-range rules. Every validation run records contract path, semantic version, and SHA-256.
 
-- required and unexpected-column rules;
-- required-value and uniqueness rules;
-- string, date, timezone-aware datetime, and finite-number types;
-- categorical vocabularies;
-- temporal ordering and not-in-future rules;
-- conditional units and plausible measurement ranges.
+## PostgreSQL migrations
 
-Each validation run records source and contract paths, versions, SHA-256 hashes, reference date, and run UUID.
-
-## Formal database migrations
-
-The database is created and upgraded through packaged SQL migrations:
+The database is created and upgraded through immutable packaged migrations:
 
 ```text
 src/clinical_data_platform/migrations/
 ├── V001__create_core_clinical_schema.sql
 ├── V002__add_longitudinal_entities_and_cohorts.sql
-└── V003__add_contract_lineage.sql
+├── V003__add_contract_lineage.sql
+└── V004__add_raw_landing_lineage.sql
 ```
 
-The migration engine:
-
-- enforces contiguous `VNNN__name.sql` ordering;
-- stores history in `public.schema_migrations`;
-- verifies migration names and SHA-256 checksums;
-- applies pending migrations transactionally;
-- uses a PostgreSQL advisory lock to prevent concurrent migration races;
-- supports explicit target versions for upgrade testing;
-- rejects downgrades and history drift;
-- supports explicit baselining of recognized pre-migration schemas.
-
-Applied migrations are immutable. A schema change is introduced by adding a new migration rather than editing an applied one.
+Migration history is stored in `public.schema_migrations`. The engine verifies contiguous ordering, names, checksums, current structure, and pending versions. Migrations execute transactionally under a PostgreSQL advisory lock.
 
 ## Implemented capabilities
 
-- active contract manifest and immutable contract resources;
-- executable structural, categorical, temporal, and measurement rules;
-- generic validation and persistence workflows;
+- immutable content-addressed raw capture and append-only receipts;
+- generic contract-governed validation for all datasets;
+- active contract manifest and retained contract versions;
 - normalized validation errors and rejected-record quarantine;
-- source and contract lineage with SHA-256 checksums;
-- formal transactional PostgreSQL migrations;
-- fresh-install, upgrade, baseline, and drift validation;
-- normalized clinical, audit, and analytics schemas;
-- transactional, idempotent dataset loading;
-- referential-integrity enforcement;
-- version-controlled hypertension cohort construction;
-- baseline feature generation and CSV export;
-- Docker and Docker Compose execution;
-- PowerShell and POSIX demo scripts;
+- source, raw, contract, run, and cohort lineage;
+- formal PostgreSQL migrations with install, upgrade, baseline, and drift tests;
+- patients, encounters, diagnoses, and observations;
+- transactional and run-idempotent persistence;
+- referential integrity and database constraints;
+- versioned hypertension cohort and baseline features;
+- Docker, Docker Compose, PowerShell, and POSIX workflows;
 - Ruff, strict mypy, pytest, coverage, PostgreSQL integration tests, and GitHub Actions.
 
 ## Fastest complete run
 
-Requirements:
-
-- Git;
-- Docker with Docker Compose.
+Requirements: Git and Docker with Docker Compose.
 
 ```bash
 git clone https://github.com/jennerfeijoo/clinical-data-platform.git
@@ -129,17 +136,12 @@ POSIX shell:
 sh scripts/run_demo.sh
 ```
 
-The workflow starts PostgreSQL, builds the image, migrates the database, validates and loads all datasets, constructs the cohort, and writes:
+The demo creates or reuses raw objects, writes new receipt manifests, migrates PostgreSQL, validates and loads all datasets, builds the cohort, and writes:
 
 ```text
+data/raw/
 data/processed/
 data/analytics/
-```
-
-Reset a local development database:
-
-```bash
-docker compose down -v
 ```
 
 ## Local Python development
@@ -148,51 +150,67 @@ docker compose down -v
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
-```
 
-Start PostgreSQL:
-
-```powershell
 Copy-Item .env.example .env
 docker compose up -d postgres
 $env:DATABASE_URL = "postgresql://clinical_user:clinical_password@localhost:5432/clinical_data"
 ```
 
-Inspect database state before modifying it:
-
-```powershell
-clinical-data database-status
-```
-
-Apply all pending migrations:
+Apply and validate migrations:
 
 ```powershell
 clinical-data database-migrate
 clinical-data database-validate
 ```
 
-Run the workflow:
+Run the complete workflow:
 
 ```powershell
 clinical-data run-demo --repository-root .
 ```
 
-### Existing local database from version 0.4.0 or earlier
+## Raw commands
 
-The migrator will not silently claim ownership of pre-existing platform tables. Review the database, then either reset the development volume or explicitly baseline a recognized schema:
+Capture one source independently:
 
 ```powershell
-clinical-data database-migrate --baseline-existing
+clinical-data raw-capture patients data/sample/patients.csv `
+  --raw-root data/raw
 ```
 
-A partial or unrecognized schema is rejected.
+Verify a receipt using its path relative to `data/raw`:
 
-## Main CLI commands
+```powershell
+clinical-data raw-verify `
+  receipts/patients/2026/07/29/<receipt-uuid>.json `
+  --raw-root data/raw
+```
+
+Validation captures automatically and then reads the captured object:
+
+```powershell
+clinical-data validate-dataset patients data/sample/patients.csv `
+  --raw-root data/raw `
+  --output-dir data/processed/patients `
+  --reference-date 2026-07-29
+```
+
+Persistence verifies the raw receipt and object before opening the write transaction:
+
+```powershell
+clinical-data load-dataset patients `
+  --raw-root data/raw `
+  --output-dir data/processed/patients
+```
+
+## Main CLI
 
 ```text
 clinical-data list-contracts
 clinical-data show-contract
 clinical-data validate-contracts
+clinical-data raw-capture
+clinical-data raw-verify
 clinical-data database-status
 clinical-data database-migrate
 clinical-data database-validate
@@ -202,39 +220,7 @@ clinical-data build-hypertension-cohort
 clinical-data run-demo
 ```
 
-List contracts:
-
-```powershell
-clinical-data list-contracts
-clinical-data show-contract observations
-clinical-data validate-contracts
-```
-
-Test an upgrade path:
-
-```powershell
-clinical-data database-migrate --target-version 1
-clinical-data database-status
-clinical-data database-migrate
-clinical-data database-validate
-```
-
-Validate patients:
-
-```powershell
-clinical-data validate-dataset patients data/sample/patients.csv `
-  --output-dir data/processed/patients `
-  --reference-date 2026-07-29
-```
-
-Load patients. The command applies pending migrations first:
-
-```powershell
-clinical-data load-dataset patients `
-  --output-dir data/processed/patients
-```
-
-## Expected sample result
+## Expected bundled sample
 
 | Dataset | Received | Valid | Invalid | Errors | Contract |
 |---|---:|---:|---:|---:|---:|
@@ -243,62 +229,31 @@ clinical-data load-dataset patients `
 | Diagnoses | 7 | 6 | 1 | 2 | 1.0.0 |
 | Observations | 14 | 13 | 1 | 1 | 1.0.0 |
 
-The hypertension cohort contains:
+The default hypertension cohort contains `P001` and `P002`.
 
-| Patient | Baseline BP | Follow-up |
-|---|---:|---:|
-| `P001` | 146/92 mmHg | 95 days |
-| `P002` | 151/96 mmHg | 37 days |
+## Lineage recorded per run
 
-## Generated outputs
-
-Each dataset produces:
+`quality_report.json` contains:
 
 ```text
-valid_<dataset>.csv
-invalid_<dataset>.csv
-validation_errors.csv
-quality_report.json
+run_id
+input_path
+input_sha256
+raw_storage_version
+raw_receipt_id
+raw_received_at
+raw_manifest_path
+raw_manifest_sha256
+raw_object_path
+raw_size_bytes
+contract_path
+contract_version
+contract_sha256
+reference_date
+row counts and rule counts
 ```
 
-The quality report includes:
-
-```json
-{
-  "contract_path": "patients/v1.0.0.toml",
-  "contract_version": "1.0.0",
-  "contract_sha256": "...",
-  "input_sha256": "...",
-  "run_id": "..."
-}
-```
-
-The analytical stage produces:
-
-```text
-data/analytics/
-├── hypertension_features.csv
-└── hypertension_cohort_metadata.json
-```
-
-## Migration history
-
-Inspect applied versions:
-
-```sql
-SELECT
-    version,
-    name,
-    checksum,
-    execution_type,
-    application_version,
-    applied_at,
-    execution_ms
-FROM public.schema_migrations
-ORDER BY version;
-```
-
-`execution_type = migration` means the runner executed the SQL. `execution_type = baseline` means an existing recognized schema was explicitly adopted without replaying historical DDL.
+`audit.pipeline_runs` persists the same raw and contract lineage. Older pre-V004 rows receive explicit `legacy/unmanaged` values rather than fabricated receipts.
 
 ## Quality checks
 
@@ -312,67 +267,31 @@ python -m pytest --cov=clinical_data_platform --cov-report=term-missing
 docker build --tag clinical-data-platform:local .
 ```
 
-CI also tests migration installation, upgrade, explicit baseline, checksum drift rejection, packaged contract discovery, Docker construction, and container resource availability.
-
-## Repository structure
-
-```text
-clinical-data-platform/
-├── .github/workflows/ci.yml
-├── data/sample/
-├── docs/
-│   ├── architecture.md
-│   ├── analysis-guide.md
-│   ├── database.md
-│   ├── hypertension-cohort.md
-│   └── learning/
-│       ├── generic-dataset-architecture-es.md
-│       ├── versioned-executable-contracts-es.md
-│       └── database-migrations-es.md
-├── scripts/
-├── sql/cohorts/
-├── src/clinical_data_platform/
-│   ├── contracts/
-│   ├── migrations/
-│   ├── cohort.py
-│   ├── contract.py
-│   ├── database.py
-│   ├── demo.py
-│   ├── ingestion.py
-│   ├── migration.py
-│   ├── models.py
-│   ├── pipeline.py
-│   └── registry.py
-├── tests/
-├── Dockerfile
-├── docker-compose.yml
-├── pyproject.toml
-└── README.md
-```
+CI also exercises raw capture and verification through the CLI and inside the built container.
 
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md): system architecture and boundaries;
-- [`docs/database.md`](docs/database.md): migrations, persistence, idempotency, and lineage;
-- [`docs/analysis-guide.md`](docs/analysis-guide.md): technical review sequence and SQL queries;
-- [`docs/learning/generic-dataset-architecture-es.md`](docs/learning/generic-dataset-architecture-es.md): generic dataset architecture;
-- [`docs/learning/versioned-executable-contracts-es.md`](docs/learning/versioned-executable-contracts-es.md): contract execution and versioning;
-- [`docs/learning/database-migrations-es.md`](docs/learning/database-migrations-es.md): formal migration study guide;
-- [`docs/hypertension-cohort.md`](docs/hypertension-cohort.md): cohort definition and variables.
+- [`docs/database.md`](docs/database.md): migrations, persistence, and lineage;
+- [`docs/analysis-guide.md`](docs/analysis-guide.md): technical review sequence and SQL;
+- [`docs/learning/generic-dataset-architecture-es.md`](docs/learning/generic-dataset-architecture-es.md);
+- [`docs/learning/versioned-executable-contracts-es.md`](docs/learning/versioned-executable-contracts-es.md);
+- [`docs/learning/database-migrations-es.md`](docs/learning/database-migrations-es.md);
+- [`docs/learning/immutable-raw-landing-zone-es.md`](docs/learning/immutable-raw-landing-zone-es.md);
+- [`docs/hypertension-cohort.md`](docs/hypertension-cohort.md).
 
 ## Current limitations
 
 The repository is not yet version `1.0.0`. Remaining milestones include:
 
-- immutable raw-data storage;
-- historical record strategy;
+- historical clinical-record versioning;
 - larger synthetic datasets and performance benchmarks;
-- expanded entities and terminology normalization;
+- additional entities and terminology normalization;
 - stronger operational observability;
-- additional cohort definitions, attrition, and missingness reporting;
-- broader security and release hardening.
+- additional cohorts, attrition, and missingness reporting;
+- security, dependency, and release hardening.
 
-It intentionally excludes identifiable patient data, production clinical decision support, enterprise authentication, and regulatory deployment claims.
+It intentionally excludes identifiable patient data, production decision support, enterprise authentication, and regulatory deployment claims.
 
 ## License
 
