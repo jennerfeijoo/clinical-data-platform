@@ -1,4 +1,4 @@
-"""PostgreSQL persistence for validated clinical data outputs."""
+"""Generic PostgreSQL persistence for validated clinical datasets."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from uuid import UUID
 import psycopg
 
 from clinical_data_platform.ingestion import read_csv_records
+from clinical_data_platform.registry import get_dataset_definition
 
 
 class DatabaseConfigurationError(RuntimeError):
@@ -24,7 +25,7 @@ class PersistenceError(RuntimeError):
 
 
 class QualityReport(TypedDict):
-    """Required fields from a patient validation quality report."""
+    """Required fields shared by every dataset quality report."""
 
     run_id: str
     dataset: str
@@ -40,12 +41,13 @@ class QualityReport(TypedDict):
 
 
 @dataclass(frozen=True, slots=True)
-class PersistenceSummary:
-    """Result of loading one validation run into PostgreSQL."""
+class DatasetPersistenceSummary:
+    """Result of loading one registered dataset into PostgreSQL."""
 
     run_id: UUID
+    dataset: str
     already_loaded: bool
-    patients_upserted: int
+    records_upserted: int
     validation_errors_inserted: int
 
 
@@ -66,7 +68,7 @@ def connect_database(database_url: str) -> psycopg.Connection[Any]:
 
 
 def apply_schema(connection: psycopg.Connection[Any], schema_path: Path) -> None:
-    """Create the clinical and audit database objects when absent."""
+    """Create the clinical, audit, and analytics database objects when absent."""
     if not schema_path.exists():
         raise FileNotFoundError(f"Schema file not found: {schema_path}")
 
@@ -108,7 +110,9 @@ def _read_quality_report(path: Path) -> QualityReport:
     for field in integer_fields:
         value = raw.get(field)
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise PersistenceError(f"Quality report field must be a non-negative integer: {field}")
+            raise PersistenceError(
+                f"Quality report field must be a non-negative integer: {field}"
+            )
 
     return QualityReport(
         run_id=raw["run_id"],
@@ -131,34 +135,33 @@ def _validate_output_counts(
     invalid_records: list[dict[str, str]],
     validation_errors: list[dict[str, str]],
 ) -> None:
-    observed_rows = len(valid_records) + len(invalid_records)
-    if report["rows_received"] != observed_rows:
-        raise PersistenceError(
-            "Quality report rows_received does not match the generated CSV outputs."
-        )
+    if report["rows_received"] != len(valid_records) + len(invalid_records):
+        raise PersistenceError("rows_received does not match the generated CSV outputs.")
     if report["rows_valid"] != len(valid_records):
-        raise PersistenceError("Quality report rows_valid does not match valid_patients.csv.")
+        raise PersistenceError("rows_valid does not match the valid-record output.")
     if report["rows_invalid"] != len(invalid_records):
-        raise PersistenceError("Quality report rows_invalid does not match invalid_patients.csv.")
+        raise PersistenceError("rows_invalid does not match the invalid-record output.")
     if report["validation_errors"] != len(validation_errors):
-        raise PersistenceError(
-            "Quality report validation_errors does not match validation_errors.csv."
-        )
+        raise PersistenceError("validation_errors does not match validation_errors.csv.")
 
 
-def persist_patient_validation_outputs(
+def persist_dataset_validation_outputs(
     connection: psycopg.Connection[Any],
+    dataset: str,
     output_directory: Path,
-) -> PersistenceSummary:
-    """Load one validated patient run and its audit metadata transactionally."""
+) -> DatasetPersistenceSummary:
+    """Load one registered dataset and its audit metadata transactionally."""
+    definition = get_dataset_definition(dataset)
     report = _read_quality_report(output_directory / "quality_report.json")
-    valid_records = read_csv_records(output_directory / "valid_patients.csv")
-    invalid_records = read_csv_records(output_directory / "invalid_patients.csv")
+    valid_records = read_csv_records(output_directory / f"valid_{dataset}.csv")
+    invalid_records = read_csv_records(output_directory / f"invalid_{dataset}.csv")
     validation_errors = read_csv_records(output_directory / "validation_errors.csv")
     _validate_output_counts(report, valid_records, invalid_records, validation_errors)
 
-    if report["dataset"] != "patients":
-        raise PersistenceError(f"Unsupported dataset in quality report: {report['dataset']}")
+    if report["dataset"] != dataset:
+        raise PersistenceError(
+            f"Quality report contains {report['dataset']!r}, expected {dataset!r}."
+        )
     if report["status"] != "completed":
         raise PersistenceError("Only completed validation runs can be persisted.")
     if len(report["input_sha256"]) != 64:
@@ -171,57 +174,39 @@ def persist_patient_validation_outputs(
     except ValueError as exc:
         raise PersistenceError("The quality report contains an invalid UUID or date.") from exc
 
-    patient_values: list[tuple[object, ...]] = []
-    for record in valid_records:
-        death_date_text = record["death_date"].strip()
-        patient_values.append(
-            (
-                record["patient_id"].strip(),
-                record["sex_at_birth"].strip(),
-                date.fromisoformat(record["birth_date"].strip()),
-                date.fromisoformat(death_date_text) if death_date_text else None,
-                record["source_system"].strip(),
-                run_id,
-                report["input_sha256"],
-            )
+    record_values = definition.row_builder(
+        valid_records,
+        run_id,
+        report["input_sha256"],
+    )
+    error_values = [
+        (
+            run_id,
+            int(error["row_number"]),
+            error["entity_id"] or None,
+            error["patient_id"] or None,
+            error["field"],
+            error["rule"],
+            error["message"],
+            error["value"] or None,
         )
-
-    error_values: list[tuple[object, ...]] = []
-    for error in validation_errors:
-        error_values.append(
-            (
-                run_id,
-                int(error["row_number"]),
-                error["patient_id"] or None,
-                error["field"],
-                error["rule"],
-                error["message"],
-                error["value"] or None,
-            )
-        )
+        for error in validation_errors
+    ]
 
     with connection.transaction():
-        insert_run = connection.execute(
+        inserted_run = connection.execute(
             """
             INSERT INTO audit.pipeline_runs (
-                run_id,
-                dataset_name,
-                source_path,
-                source_sha256,
-                reference_date,
-                rows_received,
-                rows_valid,
-                rows_invalid,
-                validation_errors,
-                status,
-                generated_at
+                run_id, dataset_name, source_path, source_sha256,
+                reference_date, rows_received, rows_valid, rows_invalid,
+                validation_errors, status, generated_at
             )
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (run_id) DO NOTHING
             """,
             (
                 run_id,
-                report["dataset"],
+                dataset,
                 report["input_path"],
                 report["input_sha256"],
                 reference_date,
@@ -234,61 +219,30 @@ def persist_patient_validation_outputs(
             ),
         )
 
-        if insert_run.rowcount == 0:
-            return PersistenceSummary(
-                run_id=run_id,
-                already_loaded=True,
-                patients_upserted=0,
-                validation_errors_inserted=0,
-            )
+        if inserted_run.rowcount == 0:
+            return DatasetPersistenceSummary(run_id, dataset, True, 0, 0)
 
-        if patient_values:
+        if record_values:
             with connection.cursor() as cursor:
-                cursor.executemany(
-                    """
-                    INSERT INTO clinical.patients (
-                        patient_id,
-                        sex_at_birth,
-                        birth_date,
-                        death_date,
-                        source_system,
-                        source_run_id,
-                        source_sha256
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (patient_id) DO UPDATE SET
-                        sex_at_birth = EXCLUDED.sex_at_birth,
-                        birth_date = EXCLUDED.birth_date,
-                        death_date = EXCLUDED.death_date,
-                        source_system = EXCLUDED.source_system,
-                        source_run_id = EXCLUDED.source_run_id,
-                        source_sha256 = EXCLUDED.source_sha256,
-                        loaded_at = CURRENT_TIMESTAMP
-                    """,
-                    patient_values,
-                )
+                cursor.executemany(definition.upsert_sql, record_values)
 
         if error_values:
             with connection.cursor() as cursor:
                 cursor.executemany(
                     """
                     INSERT INTO audit.validation_errors (
-                        run_id,
-                        row_number,
-                        patient_id,
-                        field_name,
-                        rule_name,
-                        message,
-                        rejected_value
+                        run_id, row_number, entity_id, patient_id,
+                        field_name, rule_name, message, rejected_value
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     error_values,
                 )
 
-    return PersistenceSummary(
+    return DatasetPersistenceSummary(
         run_id=run_id,
+        dataset=dataset,
         already_loaded=False,
-        patients_upserted=len(patient_values),
+        records_upserted=len(record_values),
         validation_errors_inserted=len(error_values),
     )
