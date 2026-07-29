@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.18.0
+
+- added PostgreSQL-backed compatibility jobs for CPython 3.12, 3.13, and 3.14;
+- retained Python 3.11 as the minimum, reference-quality, Docker, and benchmark interpreter;
+- changed package metadata to the explicitly tested range `>=3.11,<3.15`;
+- added Python 3.11–3.14 package classifiers and runtime metadata assertions;
+- configured the compatibility matrix with `fail-fast: false`, isolated PostgreSQL services, `pip check`, contracts, migrations, and the full coverage-gated suite;
+- upgraded workflow Python setup to `actions/setup-python@v6`;
+- added a policy-drift test linking package metadata, CI matrix, and benchmark configuration;
+- documented the support policy and maintenance process in English and Spanish;
+- retained the synthetic-only, non-clinical, non-PHI project boundary.
+
 ## 0.17.0
 
 - raised statement coverage from 82% to more than 90% without excluding package modules;
