@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SUPPORTED_VERSIONS = ("3.11", "3.12", "3.13", "3.14")
+PYTHON_CLASSIFIER_PREFIX = "Programming Language :: Python :: 3."
 
 
 def test_package_metadata_declares_only_tested_python_versions() -> None:
@@ -13,8 +14,17 @@ def test_package_metadata_declares_only_tested_python_versions() -> None:
 
     assert project["requires-python"] == ">=3.11,<3.15"
     classifiers = set(project["classifiers"])
-    for version in SUPPORTED_VERSIONS:
-        assert f"Programming Language :: Python :: {version}" in classifiers
+    declared_version_classifiers = {
+        classifier
+        for classifier in classifiers
+        if classifier.startswith(PYTHON_CLASSIFIER_PREFIX)
+    }
+    expected_version_classifiers = {
+        f"Programming Language :: Python :: {version}" for version in SUPPORTED_VERSIONS
+    }
+
+    assert "Programming Language :: Python :: 3" in classifiers
+    assert declared_version_classifiers == expected_version_classifiers
 
 
 def test_ci_matrix_matches_package_support_policy() -> None:
