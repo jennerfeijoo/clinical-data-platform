@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clinical-data-platform"
-version = "0.2.0"
-description = "A reproducible clinical data engineering MVP using synthetic healthcare data."
+version = "0.3.0"
+description = "A registry-driven clinical data engineering platform using synthetic healthcare data."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
