@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clinical-data-platform"
-version = "0.3.0"
-description = "A registry-driven clinical data engineering platform using synthetic healthcare data."
+version = "0.4.0"
+description = "A contract-governed clinical data engineering platform using synthetic healthcare data."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -33,6 +33,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"clinical_data_platform.contracts" = ["manifest.toml", "*/v*.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
