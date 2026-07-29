@@ -1,255 +1,270 @@
 # PostgreSQL migrations and persistence
 
-## Purpose
-
-The database layer has two separate responsibilities:
+## Responsibility split
 
 ```text
+raw.py
+    → preserves and verifies exact source bytes
+
 migration.py
     → creates and upgrades database structure
 
 database.py
-    → persists validated dataset outputs
+    → verifies lineage and persists validated outputs
 ```
 
-This separation prevents dataset loading code from silently redefining the schema.
+Dataset loading code does not create tables, and raw storage code does not write clinical rows.
 
-## Formal migration model
-
-The canonical schema history is stored as packaged SQL resources:
+## Formal migration history
 
 ```text
 src/clinical_data_platform/migrations/
 ├── V001__create_core_clinical_schema.sql
 ├── V002__add_longitudinal_entities_and_cohorts.sql
-└── V003__add_contract_lineage.sql
+├── V003__add_contract_lineage.sql
+└── V004__add_raw_landing_lineage.sql
 ```
 
-`sql/schema.sql` no longer exists.
+`public.schema_migrations` records version, name, checksum, timestamp, execution time, execution type, and application version.
 
-A fresh database and an upgraded database reach the same latest version through the same ordered migration set.
+Applied migrations are immutable. Schema corrections are introduced through a new migration.
 
-## Migration history table
+## V004 raw lineage
 
-The migrator records state in:
+V004 adds these fields to `audit.pipeline_runs`:
 
 ```text
-public.schema_migrations
+raw_receipt_id
+raw_received_at
+raw_storage_version
+raw_manifest_path
+raw_manifest_sha256
+raw_object_path
+raw_size_bytes
 ```
 
-Columns:
+`source_sha256` remains the hash of the captured raw object. The new fields identify the receipt event and physical content address.
 
-- `version`: ordered integer version;
-- `name`: filename-derived migration name;
-- `checksum`: SHA-256 of the exact SQL bytes;
-- `applied_at`: PostgreSQL application timestamp;
-- `execution_ms`: measured SQL execution time;
-- `execution_type`: `migration` or `baseline`;
-- `application_version`: package version that registered the change.
-
-The table is in `public` because V001 is responsible for creating the `audit` schema. This avoids requiring the migration runner to pre-create part of the domain schema before V001 executes.
-
-## Migration guarantees
-
-Before applying SQL, the engine verifies:
-
-- filenames match `VNNN__name.sql`;
-- versions are contiguous beginning with V001;
-- names are unique;
-- every applied version still exists in the package;
-- stored and packaged names match;
-- stored and packaged checksums match;
-- applied versions form a contiguous prefix;
-- detected structure is not behind or ahead of recorded history;
-- the requested target is not below the current version.
-
-Applied migrations are immutable. Changes are introduced through a new version.
-
-## Transaction and concurrency behavior
-
-Migration execution uses one PostgreSQL transaction and an advisory transaction lock.
+Rows created before V004 receive explicit legacy values:
 
 ```text
-acquire advisory lock
-→ inspect existing structure
-→ validate history
-→ execute pending SQL
-→ insert history records
-→ commit
+raw_receipt_id = zero UUID
+raw_storage_version = legacy/unmanaged
+raw_manifest_path = legacy/unmanaged
+raw_manifest_sha256 = 64 zeros
+raw_object_path = legacy/unmanaged
+raw_size_bytes = 0
 ```
 
-If any migration fails, both its DDL and its history insertion roll back.
+The migration does not fabricate a historical receipt that never existed.
 
-The advisory lock prevents two cooperating application instances from applying the same pending migration concurrently.
+## Fresh install and upgrade
 
-## Fresh installation
+Fresh installation:
+
+```text
+0 → V001 → V002 → V003 → V004
+```
+
+Upgrade test:
 
 ```powershell
+clinical-data database-migrate --target-version 3
+clinical-data database-status
 clinical-data database-migrate
 clinical-data database-validate
 ```
 
-Expected progression:
+The expected pending version at the intermediate state is V004.
 
-```text
-0 → V001 → V002 → V003
-```
+Recognized complete unmanaged schemas may be adopted only through explicit baseline. Partial structures are rejected.
 
-A second migration run applies nothing.
+## Migration guarantees
 
-## Managed upgrade
+The engine checks:
 
-A target version can be used to reproduce an earlier state:
+- `VNNN__name.sql` filenames;
+- contiguous versions from V001;
+- unique names;
+- immutable SHA-256 checksums;
+- applied-history continuity;
+- detected structure versus recorded version;
+- no downgrade;
+- advisory-lock serialization;
+- transactionally coupled DDL and history rows.
 
-```powershell
-clinical-data database-migrate --target-version 1
-clinical-data database-status
-clinical-data database-migrate
-```
-
-This supports explicit upgrade testing rather than testing only the latest fresh schema.
-
-## Existing databases and baseline
-
-A database created before the migration engine may contain complete platform tables without `public.schema_migrations`.
-
-The engine refuses to adopt it automatically. After review:
-
-```powershell
-clinical-data database-migrate --baseline-existing
-```
-
-Only complete recognized structures equivalent to V001, V002, or V003 can be baselined. Partial schemas are rejected.
-
-Baseline records use:
-
-```text
-execution_type = baseline
-```
-
-This means the SQL was not replayed; the existing structure was explicitly recognized as equivalent to the recorded versions.
-
-## Schemas
-
-### `clinical`
-
-- `clinical.patients`;
-- `clinical.encounters`;
-- `clinical.diagnoses`;
-- `clinical.observations`.
-
-### `audit`
-
-- `audit.pipeline_runs`;
-- `audit.validation_errors`;
-- `audit.cohort_runs`;
-- `audit.cohort_source_runs`.
-
-### `analytics`
-
-- `analytics.hypertension_features`.
-
-### `public`
-
-- `public.schema_migrations`.
-
-## Dataset persistence
-
-All registered datasets use:
+## Dataset persistence API
 
 ```python
 persist_dataset_validation_outputs(
     connection,
     dataset,
     output_directory,
+    raw_root=raw_root,
 )
 ```
 
-`database.py` contains the invariant transaction workflow. Dataset-specific conversion and SQL are obtained from the registry:
+`raw_root` is required because persistence reopens and verifies the immutable receipt and object referenced by `quality_report.json`.
 
-```text
-row_builder
-upsert_sql
-```
+## Pre-transaction verification
 
-Before a dataset is loaded, the CLI and demo workflow call `migrate_database()`.
+Before opening the database write transaction, `database.py` validates four groups.
 
-## Source and contract lineage
-
-Each clinical row records:
-
-- `source_run_id`;
-- `source_sha256`;
-- `loaded_at`.
-
-The corresponding `audit.pipeline_runs` row records:
-
-- dataset name;
-- source path and SHA-256;
-- contract path, version, and SHA-256;
-- reference date;
-- row counts;
-- validation-error count;
-- generation and load timestamps.
-
-## Historical contract verification
-
-The loader reads `contract_path` from `quality_report.json`, loads that retained contract resource, recalculates its SHA-256, and verifies dataset name and semantic version before persistence.
-
-The active manifest is not assumed to be the contract that produced an older output bundle.
-
-## Output consistency checks
-
-Before the write transaction, the loader verifies:
+### Output bundle
 
 - dataset identity;
 - valid, invalid, and error counts;
-- parseable UUID and dates;
-- source and contract checksum lengths;
-- existence of the referenced contract;
-- contract name, version, and hash;
-- completed run status.
+- completed status;
+- parseable UUIDs and dates.
 
-## Dataset transaction behavior
+### Contract lineage
 
-One validation run is persisted in one transaction:
+- retained contract exists;
+- dataset matches;
+- semantic version matches;
+- contract SHA-256 matches.
+
+### Raw receipt lineage
+
+- storage version is supported;
+- receipt path is safe and deterministic;
+- receipt JSON is valid;
+- receipt UUID and timestamp match;
+- receipt manifest SHA-256 matches the report.
+
+### Raw object lineage
+
+- object path is derived from SHA-256;
+- object exists under `raw_root`;
+- byte size matches;
+- recalculated SHA-256 equals `input_sha256`.
+
+Any inconsistency prevents the database transaction from starting.
+
+## Persisted lineage
+
+A normal `audit.pipeline_runs` row links:
 
 ```text
-pipeline run
+run_id
+├── external source_path
+├── raw receipt UUID and timestamp
+├── raw receipt path and SHA-256
+├── raw object path, SHA-256, and size
+├── contract path, version, and SHA-256
+├── reference date
+├── quality counts
+└── execution timestamps
+```
+
+Each clinical row retains:
+
+```text
+source_run_id
+source_sha256
+loaded_at
+```
+
+The join through `source_run_id` exposes the complete raw and contract lineage.
+
+## Query examples
+
+Inspect current migration history:
+
+```sql
+SELECT
+    version,
+    name,
+    checksum,
+    execution_type,
+    application_version,
+    applied_at
+FROM public.schema_migrations
+ORDER BY version;
+```
+
+Inspect raw lineage:
+
+```sql
+SELECT
+    dataset_name,
+    run_id,
+    raw_receipt_id,
+    raw_received_at,
+    raw_storage_version,
+    raw_manifest_path,
+    raw_manifest_sha256,
+    raw_object_path,
+    raw_size_bytes,
+    source_sha256
+FROM audit.pipeline_runs
+ORDER BY loaded_at;
+```
+
+Find repeated content receipts:
+
+```sql
+SELECT
+    dataset_name,
+    source_sha256,
+    COUNT(*) AS run_count,
+    COUNT(DISTINCT raw_receipt_id) AS receipt_count
+FROM audit.pipeline_runs
+GROUP BY dataset_name, source_sha256
+HAVING COUNT(*) > 1;
+```
+
+## Transaction behavior
+
+One validated run writes in one transaction:
+
+```text
+pipeline run metadata
 +
 valid clinical rows
 +
 validation errors
 ```
 
-Either all commit or all roll back.
+All commit or all roll back.
 
-## Dataset idempotency
+The raw object and receipt exist before this transaction. A database rollback does not delete them; source capture is an earlier durable stage.
 
-The validation output contains a UUID `run_id`. Loading the same output bundle again does not duplicate the run or its errors.
+## Idempotency and deduplication
 
-Clinical identifiers use upserts, so a later validated source run can update the current snapshot while preserving its new source lineage.
+These are distinct:
 
-This remains a snapshot strategy. Historical record retention is a later milestone.
+```text
+raw object deduplication
+    keyed by source SHA-256
+
+receipt append-only behavior
+    one UUID per reception
+
+run-level database idempotency
+    keyed by run_id
+
+clinical snapshot upsert
+    keyed by clinical entity identifier
+```
+
+Identical bytes may produce several receipts and several validation runs while still occupying one raw object.
+
+## Current snapshot boundary
+
+Clinical entity tables still represent the latest snapshot through upserts. Raw storage preserves every source receipt, but it does not yet provide SCD Type 2 history for transformed clinical records. Historical record versioning is the next separate milestone.
 
 ## Operational commands
 
 ```powershell
+clinical-data raw-capture
+clinical-data raw-verify
 clinical-data database-status
 clinical-data database-migrate
 clinical-data database-validate
+clinical-data load-dataset
 ```
 
-Inspect history directly:
+## Limitations
 
-```sql
-SELECT *
-FROM public.schema_migrations
-ORDER BY version;
-```
-
-## Design boundary
-
-The current migrator is intentionally small and SQL-first because the repository uses psycopg without an ORM. It provides ordering, locking, transactions, baselining, checksum validation, and status reporting.
-
-A larger multi-service environment may justify Alembic, Flyway, or Liquibase. The current implementation is appropriate only while its scope remains reviewable and its limitations remain explicit.
+The local filesystem implementation does not provide certified WORM retention, replication, cloud IAM, encryption policy, or administrator-resistant immutability. Those controls belong to a production object-storage deployment, not to PostgreSQL lineage alone.
