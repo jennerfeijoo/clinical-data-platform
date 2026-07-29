@@ -1,0 +1,31 @@
+[profile]
+schema_version = "1.0.0"
+name = "synthea-us-small-v1"
+source_system = "SYNTHEA_4_0_0"
+
+[upstream]
+repository = "https://github.com/synthetichealth/synthea.git"
+ref = "v4.0.0"
+version = "4.0.0"
+license = "Apache-2.0"
+minimum_java_version = 17
+
+[generation]
+population_size = 100
+random_seed = 20260729
+clinician_seed = 20260730
+reference_date = "2026-07-29"
+state = "Massachusetts"
+city = ""
+thread_pool_size = 1
+years_of_history = 0
+
+[export]
+included_files = [
+  "patients.csv",
+  "encounters.csv",
+  "conditions.csv",
+  "observations.csv",
+  "medications.csv",
+  "procedures.csv",
+]
