@@ -16,7 +16,7 @@ from clinical_data_platform.migration import (
 def test_packaged_migrations_are_contiguous_and_versioned() -> None:
     migrations = discover_migrations()
 
-    assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5, 6]
+    assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5, 6, 7]
     assert [migration.resource_path for migration in migrations] == [
         "V001__create_core_clinical_schema.sql",
         "V002__add_longitudinal_entities_and_cohorts.sql",
@@ -24,6 +24,7 @@ def test_packaged_migrations_are_contiguous_and_versioned() -> None:
         "V004__add_raw_landing_lineage.sql",
         "V005__add_clinical_history_policy.sql",
         "V006__add_medications_and_procedures.sql",
+        "V007__add_minimal_clinical_terminologies.sql",
     ]
     assert all(len(migration.checksum) == 64 for migration in migrations)
 
@@ -39,11 +40,11 @@ def test_fresh_database_is_migrated_and_reexecution_is_idempotent(
     repeated = migrate_database(connection)
 
     assert first.previous_version == 0
-    assert first.applied_versions == (1, 2, 3, 4, 5, 6)
+    assert first.applied_versions == (1, 2, 3, 4, 5, 6, 7)
     assert first.baselined_versions == ()
-    assert status.current_version == 6
+    assert status.current_version == 7
     assert status.is_current is True
-    assert repeated.previous_version == 6
+    assert repeated.previous_version == 7
     assert repeated.applied_versions == ()
 
     rows = connection.execute(
@@ -60,6 +61,7 @@ def test_fresh_database_is_migrated_and_reexecution_is_idempotent(
         (4, "migration"),
         (5, "migration"),
         (6, "migration"),
+        (7, "migration"),
     ]
 
 
@@ -76,10 +78,17 @@ def test_database_can_upgrade_from_an_earlier_managed_version(
 
     assert first.applied_versions == (1,)
     assert intermediate.current_version == 1
-    assert [migration.version for migration in intermediate.pending] == [2, 3, 4, 5, 6]
+    assert [migration.version for migration in intermediate.pending] == [
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+    ]
     assert second.previous_version == 1
-    assert second.applied_versions == (2, 3, 4, 5, 6)
-    assert final.current_version == 6
+    assert second.applied_versions == (2, 3, 4, 5, 6, 7)
+    assert final.current_version == 7
 
     history_table = connection.execute(
         "SELECT to_regclass('clinical.patient_history')"
@@ -98,10 +107,10 @@ def test_database_can_upgrade_from_contract_lineage_to_latest(
 
     assert initial.applied_versions == (1, 2, 3)
     assert intermediate.current_version == 3
-    assert [migration.version for migration in intermediate.pending] == [4, 5, 6]
+    assert [migration.version for migration in intermediate.pending] == [4, 5, 6, 7]
     assert upgraded.previous_version == 3
-    assert upgraded.applied_versions == (4, 5, 6)
-    assert validate_database_migrations(connection).current_version == 6
+    assert upgraded.applied_versions == (4, 5, 6, 7)
+    assert validate_database_migrations(connection).current_version == 7
 
 
 @pytest.mark.integration
@@ -115,9 +124,9 @@ def test_database_can_upgrade_from_raw_lineage_to_latest(
 
     assert initial.applied_versions == (1, 2, 3, 4)
     assert intermediate.current_version == 4
-    assert [migration.version for migration in intermediate.pending] == [5, 6]
+    assert [migration.version for migration in intermediate.pending] == [5, 6, 7]
     assert upgraded.previous_version == 4
-    assert upgraded.applied_versions == (5, 6)
+    assert upgraded.applied_versions == (5, 6, 7)
 
     record_hash_columns = connection.execute(
         """
@@ -137,11 +146,11 @@ def test_database_can_upgrade_from_raw_lineage_to_latest(
         ("patients",),
         ("procedures",),
     ]
-    assert validate_database_migrations(connection).current_version == 6
+    assert validate_database_migrations(connection).current_version == 7
 
 
 @pytest.mark.integration
-def test_database_can_upgrade_from_history_policy_to_six_entities(
+def test_database_can_upgrade_from_history_policy_to_latest(
     clean_database_connection: psycopg.Connection[Any],
 ) -> None:
     connection = clean_database_connection
@@ -151,16 +160,68 @@ def test_database_can_upgrade_from_history_policy_to_six_entities(
 
     assert initial.applied_versions == (1, 2, 3, 4, 5)
     assert intermediate.current_version == 5
-    assert [migration.version for migration in intermediate.pending] == [6]
+    assert [migration.version for migration in intermediate.pending] == [6, 7]
     assert upgraded.previous_version == 5
-    assert upgraded.applied_versions == (6,)
+    assert upgraded.applied_versions == (6, 7)
     assert connection.execute(
         "SELECT to_regclass('clinical.medications')"
     ).fetchone() == ("clinical.medications",)
     assert connection.execute(
         "SELECT to_regclass('clinical.procedures')"
     ).fetchone() == ("clinical.procedures",)
-    assert validate_database_migrations(connection).current_version == 6
+    assert validate_database_migrations(connection).current_version == 7
+
+
+@pytest.mark.integration
+def test_database_can_upgrade_from_six_entities_to_terminology_layer(
+    clean_database_connection: psycopg.Connection[Any],
+) -> None:
+    connection = clean_database_connection
+    initial = migrate_database(connection, target_version=6)
+    intermediate = migration_status(connection)
+    upgraded = migrate_database(connection)
+
+    assert initial.applied_versions == (1, 2, 3, 4, 5, 6)
+    assert intermediate.current_version == 6
+    assert [migration.version for migration in intermediate.pending] == [7]
+    assert upgraded.previous_version == 6
+    assert upgraded.applied_versions == (7,)
+
+    terminology_tables = connection.execute(
+        """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'terminology'
+          AND table_type = 'BASE TABLE'
+        ORDER BY table_name
+        """
+    ).fetchall()
+    assert terminology_tables == [
+        ("code_systems",),
+        ("concept_mappings",),
+        ("concepts",),
+        ("system_aliases",),
+    ]
+
+    normalized_columns = connection.execute(
+        """
+        SELECT table_name
+        FROM information_schema.columns
+        WHERE table_schema = 'clinical'
+          AND column_name = 'normalized_concept_id'
+        ORDER BY table_name
+        """
+    ).fetchall()
+    assert normalized_columns == [
+        ("diagnoses",),
+        ("medications",),
+        ("observations",),
+        ("procedures",),
+    ]
+    assert connection.execute(
+        "SELECT to_regclass('terminology.normalized_clinical_codes')"
+    ).fetchone() == ("terminology.normalized_clinical_codes",)
+    assert validate_database_migrations(connection).current_version == 7
 
 
 @pytest.mark.integration
@@ -179,10 +240,11 @@ def test_recognized_legacy_schema_requires_explicit_baseline(
     summary = migrate_database(connection, baseline_existing=True)
     status = validate_database_migrations(connection)
 
-    assert summary.baselined_versions == (1, 2, 3, 4, 5, 6)
+    assert summary.baselined_versions == (1, 2, 3, 4, 5, 6, 7)
     assert summary.applied_versions == ()
-    assert status.current_version == 6
+    assert status.current_version == 7
     assert [record.execution_type for record in status.applied] == [
+        "baseline",
         "baseline",
         "baseline",
         "baseline",
