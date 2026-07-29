@@ -1,10 +1,161 @@
-# PostgreSQL persistence
+# PostgreSQL migrations and persistence
 
 ## Purpose
 
-The persistence layer stores validated records from every registered dataset together with metadata that traces each load to both its source file and the exact contract that validated it.
+The database layer has two separate responsibilities:
 
-All datasets use:
+```text
+migration.py
+    → creates and upgrades database structure
+
+database.py
+    → persists validated dataset outputs
+```
+
+This separation prevents dataset loading code from silently redefining the schema.
+
+## Formal migration model
+
+The canonical schema history is stored as packaged SQL resources:
+
+```text
+src/clinical_data_platform/migrations/
+├── V001__create_core_clinical_schema.sql
+├── V002__add_longitudinal_entities_and_cohorts.sql
+└── V003__add_contract_lineage.sql
+```
+
+`sql/schema.sql` no longer exists.
+
+A fresh database and an upgraded database reach the same latest version through the same ordered migration set.
+
+## Migration history table
+
+The migrator records state in:
+
+```text
+public.schema_migrations
+```
+
+Columns:
+
+- `version`: ordered integer version;
+- `name`: filename-derived migration name;
+- `checksum`: SHA-256 of the exact SQL bytes;
+- `applied_at`: PostgreSQL application timestamp;
+- `execution_ms`: measured SQL execution time;
+- `execution_type`: `migration` or `baseline`;
+- `application_version`: package version that registered the change.
+
+The table is in `public` because V001 is responsible for creating the `audit` schema. This avoids requiring the migration runner to pre-create part of the domain schema before V001 executes.
+
+## Migration guarantees
+
+Before applying SQL, the engine verifies:
+
+- filenames match `VNNN__name.sql`;
+- versions are contiguous beginning with V001;
+- names are unique;
+- every applied version still exists in the package;
+- stored and packaged names match;
+- stored and packaged checksums match;
+- applied versions form a contiguous prefix;
+- detected structure is not behind or ahead of recorded history;
+- the requested target is not below the current version.
+
+Applied migrations are immutable. Changes are introduced through a new version.
+
+## Transaction and concurrency behavior
+
+Migration execution uses one PostgreSQL transaction and an advisory transaction lock.
+
+```text
+acquire advisory lock
+→ inspect existing structure
+→ validate history
+→ execute pending SQL
+→ insert history records
+→ commit
+```
+
+If any migration fails, both its DDL and its history insertion roll back.
+
+The advisory lock prevents two cooperating application instances from applying the same pending migration concurrently.
+
+## Fresh installation
+
+```powershell
+clinical-data database-migrate
+clinical-data database-validate
+```
+
+Expected progression:
+
+```text
+0 → V001 → V002 → V003
+```
+
+A second migration run applies nothing.
+
+## Managed upgrade
+
+A target version can be used to reproduce an earlier state:
+
+```powershell
+clinical-data database-migrate --target-version 1
+clinical-data database-status
+clinical-data database-migrate
+```
+
+This supports explicit upgrade testing rather than testing only the latest fresh schema.
+
+## Existing databases and baseline
+
+A database created before the migration engine may contain complete platform tables without `public.schema_migrations`.
+
+The engine refuses to adopt it automatically. After review:
+
+```powershell
+clinical-data database-migrate --baseline-existing
+```
+
+Only complete recognized structures equivalent to V001, V002, or V003 can be baselined. Partial schemas are rejected.
+
+Baseline records use:
+
+```text
+execution_type = baseline
+```
+
+This means the SQL was not replayed; the existing structure was explicitly recognized as equivalent to the recorded versions.
+
+## Schemas
+
+### `clinical`
+
+- `clinical.patients`;
+- `clinical.encounters`;
+- `clinical.diagnoses`;
+- `clinical.observations`.
+
+### `audit`
+
+- `audit.pipeline_runs`;
+- `audit.validation_errors`;
+- `audit.cohort_runs`;
+- `audit.cohort_source_runs`.
+
+### `analytics`
+
+- `analytics.hypertension_features`.
+
+### `public`
+
+- `public.schema_migrations`.
+
+## Dataset persistence
+
+All registered datasets use:
 
 ```python
 persist_dataset_validation_outputs(
@@ -14,58 +165,18 @@ persist_dataset_validation_outputs(
 )
 ```
 
-There is no separate patient persistence function.
-
-## Separation of responsibilities
-
-`database.py` contains the invariant transaction workflow.
-
-Dataset-specific persistence behavior is obtained from `DatasetDefinition`:
+`database.py` contains the invariant transaction workflow. Dataset-specific conversion and SQL are obtained from the registry:
 
 ```text
 row_builder
 upsert_sql
 ```
 
-Contract behavior is obtained from the versioned resource referenced by the quality report:
-
-```text
-contract_path
-contract_version
-contract_sha256
-```
-
-The row builder converts validated CSV strings into typed Python values. The upsert statement writes those values into the correct clinical table.
-
-## Schemas
-
-### `clinical`
-
-Contains analysis-facing clinical entities:
-
-- `clinical.patients`;
-- `clinical.encounters`;
-- `clinical.diagnoses`;
-- `clinical.observations`.
-
-### `audit`
-
-Contains execution, data-quality, contract-lineage, and cohort metadata:
-
-- `audit.pipeline_runs`;
-- `audit.validation_errors`;
-- `audit.cohort_runs`;
-- `audit.cohort_source_runs`.
-
-### `analytics`
-
-Contains generated analytical snapshots:
-
-- `analytics.hypertension_features`.
+Before a dataset is loaded, the CLI and demo workflow call `migrate_database()`.
 
 ## Source and contract lineage
 
-Each persisted clinical row records:
+Each clinical row records:
 
 - `source_run_id`;
 - `source_sha256`;
@@ -74,85 +185,71 @@ Each persisted clinical row records:
 The corresponding `audit.pipeline_runs` row records:
 
 - dataset name;
-- source path;
-- source SHA-256;
-- contract resource path;
-- contract semantic version;
-- contract SHA-256;
+- source path and SHA-256;
+- contract path, version, and SHA-256;
 - reference date;
 - row counts;
 - validation-error count;
 - generation and load timestamps.
 
-The lineage relationship is:
-
-```text
-clinical row
-    │
-    └── source_run_id
-            │
-            ▼
-    audit.pipeline_runs
-            ├── source_sha256
-            ├── contract_path
-            ├── contract_version
-            └── contract_sha256
-```
-
 ## Historical contract verification
 
-The loader does not assume that the currently active manifest version produced an older output bundle.
+The loader reads `contract_path` from `quality_report.json`, loads that retained contract resource, recalculates its SHA-256, and verifies dataset name and semantic version before persistence.
 
-Instead it:
-
-1. reads `contract_path` from `quality_report.json`;
-2. loads that retained historical resource;
-3. verifies its dataset name;
-4. verifies its semantic version;
-5. recalculates SHA-256 over its bytes;
-6. compares the result with `contract_sha256`.
-
-This allows an execution produced by `patients/v1.0.0.toml` to remain verifiable after a future manifest activates `patients/v1.1.0.toml`.
+The active manifest is not assumed to be the contract that produced an older output bundle.
 
 ## Output consistency checks
 
-Before opening the write transaction, the loader verifies that:
+Before the write transaction, the loader verifies:
 
-- the quality-report dataset matches the requested dataset;
-- received rows equal valid plus invalid rows;
-- valid-row counts match `valid_<dataset>.csv`;
-- invalid-row counts match `invalid_<dataset>.csv`;
-- error counts match `validation_errors.csv`;
-- the run UUID and dates are parseable;
-- source and contract checksums have the expected length;
-- the referenced contract exists;
-- contract name, version, and SHA-256 agree with the report;
-- the run status is `completed`.
+- dataset identity;
+- valid, invalid, and error counts;
+- parseable UUID and dates;
+- source and contract checksum lengths;
+- existence of the referenced contract;
+- contract name, version, and hash;
+- completed run status.
 
-These checks prevent incomplete or contract-inconsistent output bundles from being loaded silently.
+## Dataset transaction behavior
 
-## Transactional behavior
-
-One validation run is loaded in one database transaction. The run metadata, valid clinical rows, and validation errors either commit together or roll back together.
-
-## Idempotency
-
-The quality report contains a UUID `run_id`. Loading the same output directory again does not duplicate the pipeline run or validation errors. The loader reports that the run was already loaded.
-
-Clinical identifiers use an upsert strategy, so a later validated run can update the current record while retaining the new source run and checksum.
-
-## Legacy local databases
-
-`sql/schema.sql` adds contract-lineage columns when an older local database already contains `audit.pipeline_runs`. Existing rows receive explicit legacy placeholders:
+One validation run is persisted in one transaction:
 
 ```text
-contract_path = legacy/unversioned
-contract_version = 0.0.0
-contract_sha256 = 64 zero characters
+pipeline run
++
+valid clinical rows
++
+validation errors
 ```
 
-This compatibility block is transitional. Formal schema migration tooling is the next infrastructure milestone.
+Either all commit or all roll back.
 
-## Current design boundary
+## Dataset idempotency
 
-Contracts govern data acceptance. SQL remains controlled application code. This avoids allowing arbitrary persistence statements inside configuration files and keeps database writes reviewable and typed through row builders.
+The validation output contains a UUID `run_id`. Loading the same output bundle again does not duplicate the run or its errors.
+
+Clinical identifiers use upserts, so a later validated source run can update the current snapshot while preserving its new source lineage.
+
+This remains a snapshot strategy. Historical record retention is a later milestone.
+
+## Operational commands
+
+```powershell
+clinical-data database-status
+clinical-data database-migrate
+clinical-data database-validate
+```
+
+Inspect history directly:
+
+```sql
+SELECT *
+FROM public.schema_migrations
+ORDER BY version;
+```
+
+## Design boundary
+
+The current migrator is intentionally small and SQL-first because the repository uses psycopg without an ORM. It provides ordering, locking, transactions, baselining, checksum validation, and status reporting.
+
+A larger multi-service environment may justify Alembic, Flyway, or Liquibase. The current implementation is appropriate only while its scope remains reviewable and its limitations remain explicit.
