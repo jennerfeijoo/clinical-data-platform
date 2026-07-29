@@ -9,23 +9,29 @@ raw.py
 contract.py
     → source-row acceptance rules
 
+execution.py
+    → state machine, event hashing, local journal
+
 migration.py
     → ordered database structure
+
+run_audit.py
+    → durable execution state, events, failures, retries
 
 terminology.py
     → terminology inspection and binding validation
 
 history.py
-    → declared snapshot/event semantics
+    → snapshot and immutable-event semantics
 
 registry.py
     → typed row conversion and dataset SQL
 
 database.py
-    → lineage verification and transactional loading
+    → lineage verification and transaction coordination
 
 PostgreSQL
-    → foreign keys, concepts, hashes, history, immutability, rollback
+    → audit state, foreign keys, concepts, hashes, history, rollback
 ```
 
 ## Migration history
@@ -38,9 +44,171 @@ V004 raw lineage
 V005 patient SCD2 and immutable-event enforcement
 V006 medications and procedures
 V007 minimal clinical terminologies
+V008 complete execution lifecycle and failure audit
 ```
 
 `public.schema_migrations` stores version, name, checksum, application version, execution type, timestamp, and duration. Applied files are immutable.
+
+## V008 execution schema
+
+V008 extends `audit.pipeline_runs` with current execution state:
+
+```text
+current_stage
+attempt_count
+started_at
+validated_at
+loading_started_at
+completed_at
+failed_at
+failure_stage
+failure_type
+failure_message
+failure_code
+failure_details
+local_journal_event_count
+local_journal_head_sha256
+audit_event_count
+audit_head_sha256
+audit_gap_reason
+updated_at
+```
+
+It creates:
+
+```text
+audit.pipeline_run_events
+audit.pipeline_run_timeline
+```
+
+`pipeline_runs` is the current-state projection. `pipeline_run_events` is the append-oriented historical timeline.
+
+## State constraints
+
+Supported states:
+
+```text
+created
+raw_captured
+validating
+validated
+loading
+completed
+failed
+```
+
+Normal transitions:
+
+```text
+created → raw_captured → validating → validated → loading → completed
+```
+
+Failure and retry transitions:
+
+```text
+active state → failed
+failed → loading
+```
+
+A trigger rejects unsupported updates such as `completed → loading`. Constraints also require timestamps and failure fields to agree with the current state.
+
+## Local journal import
+
+Before registering a validated run, `database.py` verifies:
+
+1. dataset and output counts;
+2. contract path, version, and SHA-256;
+3. raw receipt and object lineage;
+4. journal version and path containment;
+5. run and dataset identity;
+6. event count and head SHA-256;
+7. state transitions and hash-chain continuity;
+8. final local status `validated`.
+
+The verified local events are imported with `event_source = local_journal`.
+
+## Three-transaction loading model
+
+### Transaction A: durable acquisition
+
+```text
+insert or verify audit.pipeline_runs
++ import local journal events
++ append validated|failed → loading
++ increment attempt_count
+→ COMMIT
+```
+
+The run is durably visible before clinical writes begin.
+
+### Transaction B: atomic clinical load
+
+```text
+valid clinical rows
++ audit.validation_errors
++ terminology bindings
++ SCD2 or immutable-event enforcement
++ loading → completed event
++ current status completed
+→ COMMIT or ROLLBACK together
+```
+
+A completed run cannot coexist with partially committed rows from that attempt.
+
+### Transaction C: durable failure
+
+When transaction B fails:
+
+```text
+ROLLBACK transaction B
+→ append loading → failed
+→ store exception metadata
+→ COMMIT transaction C
+→ re-raise original exception
+```
+
+Clinical data remains unchanged, but the failed attempt remains queryable.
+
+## Failure fields
+
+A failed run contains:
+
+```text
+failure_stage
+failure_type
+failure_message
+failure_code
+failure_details
+failed_at
+attempt_count
+```
+
+`failure_code` stores SQLSTATE when available. `failure_details` contains bounded operational context such as dataset and attempted row counts. Tracebacks are not stored in PostgreSQL.
+
+## Retry behavior
+
+A retry reuses the same validated run and appends events:
+
+```text
+loading attempt 1
+→ failed attempt 1
+→ loading attempt 2
+→ completed attempt 2
+```
+
+Current failure fields are cleared when attempt 2 acquires loading. The attempt-1 failure remains in `pipeline_run_events`.
+
+Calling load again after `completed` is idempotent: no new event or clinical write is created.
+
+## Pre-V008 history
+
+V008 cannot reconstruct states that were never recorded. Existing rows receive:
+
+```text
+audit_gap_reason = pre_v008_execution_history_unavailable
+```
+
+Their known state is retained, but `audit_event_count` remains zero. The system reports the evidence gap instead of fabricating a timeline.
 
 ## V007 terminology schema
 
@@ -54,154 +222,25 @@ terminology.concept_mappings
 terminology.normalized_clinical_codes
 ```
 
-It also adds `normalized_concept_id` to:
+It adds mandatory `normalized_concept_id` values to diagnoses, observations, medications, and procedures. Terminology triggers run before immutable-event guards.
 
-```text
-clinical.diagnoses
-clinical.observations
-clinical.medications
-clinical.procedures
-```
-
-Each column is `NOT NULL` and references `terminology.concepts`.
-
-## Resolution function
-
-```sql
-terminology.resolve_concept(
-    p_source_system,
-    p_source_code,
-    p_expected_domain
-)
-```
-
-The function:
-
-1. requires non-empty system and code;
-2. resolves the system alias;
-3. locates the source concept;
-4. follows an optional concept mapping;
-5. requires an active target;
-6. checks the clinical domain;
-7. returns the normalized concept identifier.
-
-Failures use PostgreSQL integrity errors so the dataset transaction rolls back.
-
-## Trigger order
-
-Terminology triggers are installed as `trg_00_*_terminology` and run before the existing immutable-event guards.
-
-```text
-incoming coded row
-→ assign normalized_concept_id
-→ calculate/check business-record hash
-→ insert, no-op, or reject conflict
-```
-
-The normalized foreign key is not part of `record_sha256`. The source system and source code remain the stable business representation used by immutable-event comparison.
-
-## Upgrade from V006
-
-A V006 database may already contain codes that were accepted before terminology enforcement.
-
-V007:
-
-1. installs the curated subset;
-2. imports previously accepted diagnosis, medication, and procedure codes that are absent from that subset;
-3. labels imported entries `unverified`;
-4. backfills all normalized foreign keys;
-5. makes the columns mandatory;
-6. installs strict triggers for future writes.
-
-This avoids blocking a managed upgrade while preventing unverified legacy codes from being described as externally validated.
-
-## New-write behavior
-
-After V007, a new coded row is rejected when:
-
-```text
-source system alias missing
-source code absent
-concept inactive
-normalized domain incorrect
-```
-
-Example:
-
-```text
-ICD10:ZZZ.999
-→ contract may accept structure
-→ terminology subset has no concept
-→ PostgreSQL integrity error
-→ complete diagnosis load rolls back
-```
-
-## Pre-transaction verification
-
-Before database writes, `database.py` verifies:
-
-1. output counts and completed status;
-2. dataset identity;
-3. retained contract path, version, and SHA-256;
-4. raw storage version;
-5. receipt UUID, timestamp, path, and manifest hash;
-6. raw object path, byte size, and SHA-256;
-7. parseable run metadata.
-
-Terminology resolution occurs inside the write transaction because it depends on current database state.
-
-## Transaction behavior
-
-One load writes:
-
-```text
-audit.pipeline_runs
-+ valid clinical rows
-+ validation errors
-+ terminology bindings
-+ SCD2 transitions or immutable-event checks
-```
-
-All operations commit or roll back together.
-
-The raw object, receipt, processed outputs, and quality report exist before this transaction. A database rollback does not delete those investigative artifacts.
-
-## Exact immutable-event duplicate
-
-```text
-same event identifier
-+ same source clinical content
-→ terminology resolves consistently
-→ immutable guard returns stored row
-→ original source_run_id remains
-```
-
-## Conflicting immutable-event identity
-
-```text
-same event identifier
-+ different source clinical content
-→ terminology resolves or rejects
-→ immutable conflict when content differs
-→ complete load rollback
-→ original event remains unchanged
-```
+Unknown or wrong-domain concepts fail transaction B. V008 then records the terminology error durably in transaction C.
 
 ## Migration detection
 
-Version 7 is recognized only when all of these are present:
+Version 8 is recognized only when all of these are present:
 
-- four terminology base tables;
-- four `normalized_concept_id` columns;
-- the normalized-code inspection view;
-- complete V006 structure.
+- complete V007 structure;
+- all execution-state columns in `audit.pipeline_runs`;
+- `audit.pipeline_run_events`;
+- `audit.pipeline_run_timeline`.
 
-A partial terminology schema is rejected rather than baselined.
+A partial execution-audit schema is rejected rather than baselined.
 
 ## Upgrade commands
 
 ```powershell
-clinical-data database-migrate --target-version 6
+clinical-data database-migrate --target-version 7
 clinical-data database-status
 clinical-data database-migrate
 clinical-data database-validate
@@ -210,9 +249,9 @@ clinical-data database-validate
 After the final command:
 
 ```text
-detected=7
-current=7
-latest=7
+detected=8
+current=8
+latest=8
 pending=[]
 ```
 
@@ -226,61 +265,67 @@ FROM public.schema_migrations
 ORDER BY version;
 ```
 
-Registered systems:
+Current executions:
 
 ```sql
 SELECT
-    code_system_id,
-    canonical_uri,
-    upstream_version,
-    subset_version,
-    complete_release,
-    license_note
-FROM terminology.code_systems
-ORDER BY code_system_id;
+    run_id,
+    dataset_name,
+    status,
+    current_stage,
+    attempt_count,
+    failure_code,
+    failure_message,
+    audit_event_count,
+    audit_gap_reason
+FROM audit.pipeline_runs
+ORDER BY updated_at DESC;
 ```
 
-Concept counts:
+One timeline:
 
 ```sql
-SELECT code_system_id, domain, verification_status, COUNT(*)
-FROM terminology.concepts
-GROUP BY code_system_id, domain, verification_status
-ORDER BY code_system_id, domain, verification_status;
+SELECT
+    sequence_number,
+    attempt_number,
+    from_status,
+    to_status,
+    stage,
+    occurred_at,
+    error_type,
+    error_code,
+    error_message,
+    event_source,
+    previous_event_sha256,
+    event_sha256
+FROM audit.pipeline_run_timeline
+WHERE run_id = '<run-uuid>'
+ORDER BY sequence_number;
 ```
 
-Normalized clinical rows:
+Failed runs:
 
 ```sql
-SELECT *
-FROM terminology.normalized_clinical_codes
-ORDER BY dataset_name, entity_id;
+SELECT
+    dataset_name,
+    failure_stage,
+    failure_code,
+    COUNT(*)
+FROM audit.pipeline_runs
+WHERE status = 'failed'
+GROUP BY dataset_name, failure_stage, failure_code
+ORDER BY COUNT(*) DESC;
 ```
 
-Unbound or invalid rows should return zero:
+Retried runs:
 
 ```sql
-SELECT COUNT(*)
-FROM (
-    SELECT normalized_concept_id, 'condition' AS expected_domain
-    FROM clinical.diagnoses
-    UNION ALL
-    SELECT normalized_concept_id, 'observation'
-    FROM clinical.observations
-    UNION ALL
-    SELECT normalized_concept_id, 'medication'
-    FROM clinical.medications
-    UNION ALL
-    SELECT normalized_concept_id, 'procedure'
-    FROM clinical.procedures
-) AS binding
-LEFT JOIN terminology.concepts AS concept
-    ON concept.concept_id = binding.normalized_concept_id
-WHERE concept.concept_id IS NULL
-   OR NOT concept.active
-   OR concept.domain <> binding.expected_domain;
+SELECT run_id, dataset_name, status, attempt_count
+FROM audit.pipeline_runs
+WHERE attempt_count > 1
+ORDER BY updated_at DESC;
 ```
 
 ## Limits
 
-The database layer does not yet provide terminology release importers, hierarchy traversal, UCUM, FHIR terminology operations, complete execution-state auditing, structured logging, event supersession, tombstones, bitemporal modelling, bulk staging/`COPY`, production access controls, or PHI-ready governance.
+The database layer does not yet provide structured application logging, external log transport, distributed tracing, scheduler heartbeats, stale-loading recovery, terminology release importers, event supersession, bitemporal modelling, bulk staging/`COPY`, production access controls, or PHI-ready governance.
