@@ -1,0 +1,9 @@
+patient_id,sex_at_birth,birth_date,death_date,source_system
+P001,F,1985-04-12,,synthetic_ehr
+P002,M,1972-11-03,,synthetic_ehr
+P003,F,2001-06-20,,synthetic_ehr
+P004,M,1950-01-15,2020-08-11,synthetic_ehr
+P005,UNKNOWN,1994-09-02,,synthetic_ehr
+P006,F,2032-05-10,,synthetic_ehr
+P007,X,1988-07-14,,synthetic_ehr
+P008,M,1990-03-18,1989-02-01,synthetic_ehr
