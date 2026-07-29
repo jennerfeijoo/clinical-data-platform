@@ -7,7 +7,7 @@
 - configured weekly Dependabot updates for Python, GitHub Actions, and Docker;
 - pinned every external GitHub Action to a full commit SHA and added a policy test that rejects mutable references;
 - added a reviewed Bandit baseline limited to two constant-only B608 findings, with an exact policy test preventing silent expansion;
-- raised the build-system floor to `setuptools>=83` and upgraded vulnerable `wheel` and `jaraco.context` versions in the container;
+- raised the build-system floor to `setuptools>=83` and converted the container to a multi-stage build whose runtime excludes `pip`, `setuptools`, `wheel`, global site-packages, and `ensurepip` bootstrap bundles;
 - documented that GitHub Dependency Review is unavailable because Dependency Graph is not enabled, while every pull request remains gated by a complete resolved-environment audit;
 - added a repository security-reporting policy and technical documentation in English and Spanish;
 - retained the synthetic-only, non-clinical, non-PHI project boundary and documented that automated scans do not prove security.
