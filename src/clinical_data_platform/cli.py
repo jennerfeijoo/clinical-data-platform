@@ -77,36 +77,39 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "validate-patients":
-        summary = run_patient_validation(
+        validation_summary = run_patient_validation(
             args.input,
             args.output_dir,
             reference_date=args.reference_date,
         )
         print(
             "Patient validation completed: "
-            f"run_id={summary.run_id}, "
-            f"received={summary.rows_received}, "
-            f"valid={summary.rows_valid}, "
-            f"invalid={summary.rows_invalid}, "
-            f"errors={summary.validation_errors}"
+            f"run_id={validation_summary.run_id}, "
+            f"received={validation_summary.rows_received}, "
+            f"valid={validation_summary.rows_valid}, "
+            f"invalid={validation_summary.rows_invalid}, "
+            f"errors={validation_summary.validation_errors}"
         )
-        print(f"Quality report: {summary.quality_report_path}")
+        print(f"Quality report: {validation_summary.quality_report_path}")
         return 0
 
     if args.command == "load-patients":
         database_url = args.database_url or database_url_from_environment()
         with connect_database(database_url) as connection:
             apply_schema(connection, args.schema)
-            summary = persist_patient_validation_outputs(connection, args.output_dir)
+            persistence_summary = persist_patient_validation_outputs(
+                connection,
+                args.output_dir,
+            )
 
-        if summary.already_loaded:
-            print(f"Validation run already loaded: run_id={summary.run_id}")
+        if persistence_summary.already_loaded:
+            print(f"Validation run already loaded: run_id={persistence_summary.run_id}")
         else:
             print(
                 "Patient persistence completed: "
-                f"run_id={summary.run_id}, "
-                f"patients={summary.patients_upserted}, "
-                f"errors={summary.validation_errors_inserted}"
+                f"run_id={persistence_summary.run_id}, "
+                f"patients={persistence_summary.patients_upserted}, "
+                f"errors={persistence_summary.validation_errors_inserted}"
             )
         return 0
 
