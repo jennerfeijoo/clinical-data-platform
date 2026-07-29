@@ -6,6 +6,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SUPPORTED_VERSIONS = ("3.11", "3.12", "3.13", "3.14")
 PYTHON_CLASSIFIER_PREFIX = "Programming Language :: Python :: 3."
+SETUP_PYTHON_PIN = (
+    "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.2.0"
+)
 
 
 def test_package_metadata_declares_only_tested_python_versions() -> None:
@@ -35,7 +38,7 @@ def test_ci_matrix_matches_package_support_policy() -> None:
     assert "fail-fast: false" in workflow
     assert "python -m pip check" in workflow
     assert "python -m pytest" in workflow
-    assert "actions/setup-python@v6" in workflow
+    assert SETUP_PYTHON_PIN in workflow
 
 
 def test_benchmark_stays_on_reference_python() -> None:
@@ -45,4 +48,4 @@ def test_benchmark_stays_on_reference_python() -> None:
 
     assert "Python 3.11 reference" in workflow
     assert 'python-version: "3.11"' in workflow
-    assert "actions/setup-python@v6" in workflow
+    assert SETUP_PYTHON_PIN in workflow
