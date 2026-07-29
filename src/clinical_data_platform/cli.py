@@ -24,6 +24,14 @@ from clinical_data_platform.migration import (
 from clinical_data_platform.pipeline import run_dataset_validation
 from clinical_data_platform.raw import capture_raw_source, verify_raw_receipt
 from clinical_data_platform.registry import dataset_names
+from clinical_data_platform.synthea import (
+    adapt_synthea_csv,
+    generate_synthea_dataset,
+    load_adapted_synthea_dataset,
+    load_synthea_profile,
+    synthea_profile_document,
+    verify_synthea_adaptation,
+)
 
 
 def _iso_date(value: str) -> date:
@@ -66,6 +74,15 @@ def _add_raw_root(parser: argparse.ArgumentParser) -> None:
         type=Path,
         default=_default_raw_root(),
         help="Root directory for immutable content objects and receipt manifests.",
+    )
+
+
+def _add_synthea_profile(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--profile",
+        type=Path,
+        default=None,
+        help="Optional external TOML profile; defaults to the packaged pinned profile.",
     )
 
 
@@ -167,6 +184,61 @@ def build_parser() -> argparse.ArgumentParser:
     build_cohort.add_argument("--baseline-window-days", type=int, default=30)
     _add_baseline_flag(build_cohort)
     _add_database_url(build_cohort)
+
+    show_synthea_profile = subparsers.add_parser(
+        "synthea-profile",
+        help="Display the pinned Synthea reproducibility profile as JSON.",
+    )
+    _add_synthea_profile(show_synthea_profile)
+
+    generate_synthea = subparsers.add_parser(
+        "synthea-generate",
+        help="Clone the pinned Synthea tag and generate reproducible CSV source files.",
+    )
+    generate_synthea.add_argument(
+        "--workspace",
+        type=Path,
+        default=Path("data/synthea/synthea-us-small-v1"),
+    )
+    generate_synthea.add_argument("--checkout", type=Path, default=None)
+    generate_synthea.add_argument("--replace", action="store_true")
+    _add_synthea_profile(generate_synthea)
+
+    adapt_synthea = subparsers.add_parser(
+        "synthea-adapt",
+        help="Convert Synthea 4.0.0 CSV files into six contract-ready datasets.",
+    )
+    adapt_synthea.add_argument("csv_directory", type=Path)
+    adapt_synthea.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("data/synthea/normalized"),
+    )
+    adapt_synthea.add_argument("--generation-manifest", type=Path, default=None)
+    adapt_synthea.add_argument("--replace", action="store_true")
+    _add_synthea_profile(adapt_synthea)
+
+    verify_synthea = subparsers.add_parser(
+        "synthea-verify",
+        help="Verify adapted Synthea hashes, counts, schema, and fingerprint.",
+    )
+    verify_synthea.add_argument("output_directory", type=Path)
+    _add_synthea_profile(verify_synthea)
+
+    load_synthea = subparsers.add_parser(
+        "synthea-load",
+        help="Import terminology and load all six adapted Synthea datasets.",
+    )
+    load_synthea.add_argument("normalized_directory", type=Path)
+    load_synthea.add_argument(
+        "--processed-root",
+        type=Path,
+        default=Path("data/processed/synthea"),
+    )
+    _add_synthea_profile(load_synthea)
+    _add_raw_root(load_synthea)
+    _add_baseline_flag(load_synthea)
+    _add_database_url(load_synthea)
 
     demo = subparsers.add_parser(
         "run-demo",
@@ -372,6 +444,78 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"cohort_run_id={cohort_summary.cohort_run_id}, "
             f"rows={cohort_summary.row_count}, "
             f"features={cohort_summary.features_path}"
+        )
+        return 0
+
+    if args.command == "synthea-profile":
+        profile = load_synthea_profile(args.profile)
+        print(json.dumps(synthea_profile_document(profile), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "synthea-generate":
+        profile = load_synthea_profile(args.profile)
+        summary = generate_synthea_dataset(
+            args.workspace,
+            profile=profile,
+            checkout_directory=args.checkout,
+            replace=args.replace,
+        )
+        print(
+            "Synthea generation completed: "
+            f"profile={summary.profile_name}, "
+            f"upstream_commit={summary.upstream_commit}, "
+            f"files={len(summary.files)}, "
+            f"fingerprint={summary.dataset_fingerprint}, "
+            f"manifest={summary.manifest_path}"
+        )
+        return 0
+
+    if args.command == "synthea-adapt":
+        profile = load_synthea_profile(args.profile)
+        summary = adapt_synthea_csv(
+            args.csv_directory,
+            args.output_dir,
+            profile=profile,
+            generation_manifest_path=args.generation_manifest,
+            replace=args.replace,
+        )
+        print(
+            "Synthea adaptation completed: "
+            f"profile={summary.profile_name}, "
+            f"rows={summary.dataset_rows}, "
+            f"omitted={summary.omitted_rows}, "
+            f"terminology={summary.terminology_concepts}, "
+            f"fingerprint={summary.adaptation_fingerprint}"
+        )
+        return 0
+
+    if args.command == "synthea-verify":
+        profile = load_synthea_profile(args.profile)
+        summary = verify_synthea_adaptation(args.output_directory, profile=profile)
+        print(
+            "Synthea adaptation verified: "
+            f"profile={summary.profile_name}, "
+            f"rows={summary.dataset_rows}, "
+            f"fingerprint={summary.adaptation_fingerprint}"
+        )
+        return 0
+
+    if args.command == "synthea-load":
+        profile = load_synthea_profile(args.profile)
+        with connect_database(_database_url(args.database_url)) as connection:
+            migrate_database(connection, baseline_existing=args.baseline_existing)
+            summary = load_adapted_synthea_dataset(
+                connection,
+                args.normalized_directory,
+                args.processed_root,
+                raw_root=args.raw_root,
+                profile=profile,
+            )
+        print(
+            "Synthea load completed: "
+            f"terminology_inserted={summary.terminology.concepts_inserted}, "
+            f"terminology_existing={summary.terminology.concepts_existing}, "
+            f"records={summary.records_persisted}"
         )
         return 0
 
