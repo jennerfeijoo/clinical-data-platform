@@ -1,0 +1,53 @@
+"""Shared data structures for dataset validation and pipeline execution."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from uuid import UUID
+
+ClinicalRecord = dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationError:
+    """One normalized validation failure for any registered dataset."""
+
+    row_number: int
+    entity_id: str
+    patient_id: str
+    field: str
+    rule: str
+    message: str
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationResult:
+    """Valid rows, rejected rows, and normalized validation failures."""
+
+    valid_records: tuple[ClinicalRecord, ...]
+    invalid_records: tuple[ClinicalRecord, ...]
+    errors: tuple[ValidationError, ...]
+
+    @property
+    def rows_received(self) -> int:
+        """Return the total number of evaluated rows."""
+        return len(self.valid_records) + len(self.invalid_records)
+
+
+@dataclass(frozen=True, slots=True)
+class DatasetPipelineSummary:
+    """Summary and output locations for one generic dataset-validation run."""
+
+    run_id: UUID
+    dataset: str
+    source_sha256: str
+    rows_received: int
+    rows_valid: int
+    rows_invalid: int
+    validation_errors: int
+    valid_records_path: Path
+    invalid_records_path: Path
+    validation_errors_path: Path
+    quality_report_path: Path
