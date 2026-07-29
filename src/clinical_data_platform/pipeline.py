@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
+from uuid import UUID, uuid4
 
 from clinical_data_platform.ingestion import read_csv_records
 from clinical_data_platform.validation import (
@@ -23,6 +24,8 @@ from clinical_data_platform.validation import (
 class PipelineSummary:
     """Summary and output locations for one validation run."""
 
+    run_id: UUID
+    source_sha256: str
     rows_received: int
     rows_valid: int
     rows_invalid: int
@@ -63,6 +66,8 @@ def run_patient_validation(
     reference_date: date | None = None,
 ) -> PipelineSummary:
     """Read, validate, and write patient data-quality outputs."""
+    run_id = uuid4()
+    source_sha256 = _sha256(input_path)
     effective_reference_date = reference_date or date.today()
     records = read_csv_records(input_path)
     result = validate_patient_records(records, reference_date=effective_reference_date)
@@ -79,10 +84,11 @@ def run_patient_validation(
 
     rule_counts = Counter(error.rule for error in result.errors)
     quality_report: dict[str, object] = {
+        "run_id": str(run_id),
         "dataset": "patients",
         "generated_at": datetime.now(UTC).isoformat(),
         "input_path": str(input_path),
-        "input_sha256": _sha256(input_path),
+        "input_sha256": source_sha256,
         "reference_date": effective_reference_date.isoformat(),
         "rows_received": result.rows_received,
         "rows_valid": len(result.valid_records),
@@ -96,6 +102,8 @@ def run_patient_validation(
         file.write("\n")
 
     return PipelineSummary(
+        run_id=run_id,
+        source_sha256=source_sha256,
         rows_received=result.rows_received,
         rows_valid=len(result.valid_records),
         rows_invalid=len(result.invalid_records),

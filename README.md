@@ -1,16 +1,16 @@
 # Clinical Data Platform
 
-> Status: early development — the first patient-data validation workflow is implemented.
+> Status: early development — patient validation and PostgreSQL persistence are implemented.
 
 Clinical Data Platform is a portfolio project for building reproducible clinical data engineering workflows with synthetic healthcare data.
 
-The current milestone reads a patient CSV file, applies structural and clinical consistency rules, separates valid and invalid records, and produces auditable quality outputs. PostgreSQL storage, cohort construction, and feature engineering remain planned work.
+The current implementation reads a patient CSV file, applies structural and clinical consistency rules, separates valid and invalid records, produces auditable quality outputs, and persists valid records plus lineage metadata in PostgreSQL. Cohort construction and feature engineering remain planned work.
 
 ## Motivation
 
 Clinical datasets may contain inconsistent schemas, duplicated identifiers, invalid dates, missing values, incompatible categories, and broken temporal relationships.
 
-This project demonstrates how software engineering and data-quality controls can detect and document these problems without silently discarding rejected records.
+This project demonstrates how software engineering, data-quality controls, relational modeling, and transactional persistence can detect and document these problems without silently discarding rejected records.
 
 ## Current workflow
 
@@ -24,10 +24,17 @@ Safe CSV ingestion
 Structural and clinical validation
     │
     ├── Valid rows ────────► valid_patients.csv
+    │                          │
+    │                          ▼
+    │                     PostgreSQL
+    │                     clinical.patients
     │
     └── Invalid rows ──────► invalid_patients.csv
                               validation_errors.csv
                               quality_report.json
+                                  │
+                                  ▼
+                              PostgreSQL audit tables
 ```
 
 ## Implemented capabilities
@@ -39,9 +46,13 @@ Structural and clinical validation
 - required-value, uniqueness, categorical, date-format, future-date, and temporal-consistency rules;
 - valid-record and invalid-record outputs;
 - structured validation-error output;
-- JSON quality report with a source-file SHA-256 checksum;
+- JSON quality report with a run UUID and source-file SHA-256 checksum;
+- PostgreSQL clinical and audit schemas;
+- transactional and idempotent loading of validation outputs;
+- patient upserts with source-run lineage;
+- Docker Compose configuration for local PostgreSQL;
 - command-line interface;
-- unit and end-to-end tests;
+- unit, end-to-end, and PostgreSQL integration tests;
 - Ruff, mypy, pytest, and GitHub Actions configuration.
 
 ## Quick start
@@ -50,6 +61,7 @@ Structural and clinical validation
 
 - Python 3.11 or later
 - Git
+- Docker with Docker Compose
 
 ### Install
 
@@ -71,21 +83,47 @@ Install the project and development tools:
 python -m pip install -e ".[dev]"
 ```
 
-### Run the patient validation workflow
+### Start PostgreSQL
+
+Create the local environment file and start the database:
+
+```powershell
+Copy-Item .env.example .env
+docker compose up -d postgres
+$env:DATABASE_URL = "postgresql://clinical_user:clinical_password@localhost:5432/clinical_data"
+```
+
+Check the service state:
 
 ```bash
-clinical-data validate-patients data/sample/patients.csv \
-  --output-dir data/processed/patients \
+docker compose ps
+```
+
+### Validate the sample patient data
+
+```powershell
+clinical-data validate-patients data/sample/patients.csv `
+  --output-dir data/processed/patients `
   --reference-date 2026-07-29
 ```
 
-The same command can be run through the Python module:
+The same workflow can be run through the Python module:
 
-```bash
-python -m clinical_data_platform validate-patients data/sample/patients.csv \
-  --output-dir data/processed/patients \
+```powershell
+python -m clinical_data_platform validate-patients data/sample/patients.csv `
+  --output-dir data/processed/patients `
   --reference-date 2026-07-29
 ```
+
+### Load validated outputs into PostgreSQL
+
+```powershell
+clinical-data load-patients `
+  --output-dir data/processed/patients `
+  --schema sql/schema.sql
+```
+
+Loading the same validation-output directory again is idempotent: the existing `run_id` is detected and the audit rows are not duplicated.
 
 ### Run quality checks
 
@@ -95,9 +133,9 @@ python -m mypy src
 python -m pytest
 ```
 
-## Outputs
+## File outputs
 
-A successful run creates:
+A successful validation run creates:
 
 ```text
 data/processed/patients/
@@ -119,21 +157,42 @@ The sample intentionally exercises three rules:
 - an unsupported `sex_at_birth` value;
 - a death date preceding the birth date.
 
+## PostgreSQL model
+
+The database uses two schemas:
+
+```text
+clinical.patients
+
+audit.pipeline_runs
+audit.validation_errors
+```
+
+Each patient row retains the `source_run_id` and source-file checksum. The matching pipeline-run record stores input provenance, validation counts, reference date, status, and timestamps.
+
+See [`docs/database.md`](docs/database.md) for persistence and idempotency details.
+
 ## Repository structure
 
 ```text
 clinical-data-platform/
 ├── .github/workflows/ci.yml
 ├── data/sample/patients.csv
-├── docs/data-contracts/patients.md
+├── docs/
+│   ├── data-contracts/patients.md
+│   └── database.md
+├── sql/schema.sql
 ├── src/clinical_data_platform/
 │   ├── __init__.py
 │   ├── __main__.py
 │   ├── cli.py
+│   ├── database.py
 │   ├── ingestion.py
 │   ├── pipeline.py
 │   └── validation.py
 ├── tests/
+├── .env.example
+├── docker-compose.yml
 ├── pyproject.toml
 └── README.md
 ```
@@ -148,29 +207,17 @@ clinical-data-platform/
 - [x] Invalid-record quarantine outputs
 - [x] Structured quality report
 - [x] Automated tests and continuous integration
-- [ ] PostgreSQL schema and loading
+- [x] PostgreSQL schema and loading
+- [x] Basic data-lineage persistence
+- [x] Docker Compose database environment
 - [ ] Reproducible cohort construction
 - [ ] Feature generation
-- [ ] Data-lineage persistence
-- [ ] Docker Compose environment
+- [ ] Expanded clinical entities
+- [ ] Workflow orchestration
 
-## Planned architecture
+## Next milestone
 
-```text
-Validated clinical data
-        │
-        ▼
-PostgreSQL
-        │
-        ▼
-Cohort construction
-        │
-        ▼
-Feature generation
-        │
-        ▼
-Analysis-ready datasets
-```
+The next milestone will add a reproducible hypertension cohort and baseline feature table derived from the persisted patient and observation data.
 
 ## Data and privacy
 

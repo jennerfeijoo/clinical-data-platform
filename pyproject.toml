@@ -11,7 +11,9 @@ requires-python = ">=3.11"
 authors = [
     { name = "Jenner Feijoo" }
 ]
-dependencies = []
+dependencies = [
+    "psycopg[binary]>=3.2,<4"
+]
 
 [project.scripts]
 clinical-data = "clinical_data_platform.cli:main"
@@ -30,6 +32,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+markers = [
+    "integration: tests that require a running PostgreSQL instance"
+]
 
 [tool.ruff]
 line-length = 100
