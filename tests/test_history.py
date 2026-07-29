@@ -76,7 +76,13 @@ def test_history_policy_is_explicit_for_every_current_dataset() -> None:
         "clinical.patient_history"
     )
 
-    for dataset in ("encounters", "diagnoses", "observations"):
+    for dataset in (
+        "encounters",
+        "diagnoses",
+        "observations",
+        "medications",
+        "procedures",
+    ):
         policy = get_clinical_history_policy(dataset)
         assert policy.mode == "immutable_event"
         assert policy.history_table is None
@@ -85,7 +91,7 @@ def test_history_policy_is_explicit_for_every_current_dataset() -> None:
 
 def test_unknown_history_policy_is_rejected() -> None:
     with pytest.raises(ValueError, match="No clinical history policy"):
-        get_clinical_history_policy("medications")
+        get_clinical_history_policy("allergies")
 
 
 @pytest.mark.integration
