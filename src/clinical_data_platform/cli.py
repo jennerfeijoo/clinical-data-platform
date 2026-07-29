@@ -22,6 +22,7 @@ from clinical_data_platform.migration import (
     validate_database_migrations,
 )
 from clinical_data_platform.pipeline import run_dataset_validation
+from clinical_data_platform.raw import capture_raw_source, verify_raw_receipt
 from clinical_data_platform.registry import dataset_names
 
 
@@ -40,6 +41,10 @@ def _default_output_directory(dataset: str) -> Path:
     return Path("data") / "processed" / dataset
 
 
+def _default_raw_root() -> Path:
+    return Path("data") / "raw"
+
+
 def _add_database_url(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--database-url", default=None)
 
@@ -52,6 +57,15 @@ def _add_baseline_flag(parser: argparse.ArgumentParser) -> None:
             "Adopt a recognized pre-migration schema after explicit review. "
             "Do not use for unknown or partially modified databases."
         ),
+    )
+
+
+def _add_raw_root(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--raw-root",
+        type=Path,
+        default=_default_raw_root(),
+        help="Root directory for immutable content objects and receipt manifests.",
     )
 
 
@@ -79,6 +93,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Load and validate every active contract definition.",
     )
 
+    capture_raw = subparsers.add_parser(
+        "raw-capture",
+        help="Capture one CSV source into immutable content-addressed storage.",
+    )
+    capture_raw.add_argument("dataset", choices=supported_datasets)
+    capture_raw.add_argument("input", type=Path)
+    _add_raw_root(capture_raw)
+
+    verify_raw = subparsers.add_parser(
+        "raw-verify",
+        help="Verify a receipt manifest and the content object it references.",
+    )
+    verify_raw.add_argument("manifest", help="Receipt path relative to --raw-root.")
+    _add_raw_root(verify_raw)
+
     migrate = subparsers.add_parser(
         "database-migrate",
         help="Apply packaged PostgreSQL migrations in version order.",
@@ -101,19 +130,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate_dataset = subparsers.add_parser(
         "validate-dataset",
-        help="Validate any registered dataset and write quality outputs.",
+        help="Capture and validate any registered dataset and write quality outputs.",
     )
     validate_dataset.add_argument("dataset", choices=supported_datasets)
     validate_dataset.add_argument("input", type=Path)
     validate_dataset.add_argument("--output-dir", type=Path, default=None)
     validate_dataset.add_argument("--reference-date", type=_iso_date, default=None)
+    _add_raw_root(validate_dataset)
 
     load_dataset = subparsers.add_parser(
         "load-dataset",
-        help="Migrate PostgreSQL and load one validated dataset transactionally.",
+        help="Verify raw lineage, migrate PostgreSQL, and load validated data.",
     )
     load_dataset.add_argument("dataset", choices=supported_datasets)
     load_dataset.add_argument("--output-dir", type=Path, default=None)
+    _add_raw_root(load_dataset)
     _add_baseline_flag(load_dataset)
     _add_database_url(load_dataset)
 
@@ -139,7 +170,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     demo = subparsers.add_parser(
         "run-demo",
-        help="Run migrations, validation, persistence, cohort construction, and export.",
+        help="Run raw capture, migrations, validation, persistence, cohort, and export.",
     )
     demo.add_argument("--repository-root", type=Path, default=Path("."))
     demo.add_argument("--reference-date", type=_iso_date, default=date(2026, 7, 29))
@@ -218,6 +249,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"{contract.name} {contract.version} {contract.sha256}")
         return 0
 
+    if args.command == "raw-capture":
+        receipt = capture_raw_source(args.dataset, args.input, args.raw_root)
+        print(
+            "Raw capture completed: "
+            f"receipt_id={receipt.receipt_id}, "
+            f"sha256={receipt.sha256}, size={receipt.size_bytes}, "
+            f"object_created={receipt.object_created}, "
+            f"manifest={receipt.manifest_relative_path}, "
+            f"object={receipt.object_relative_path}"
+        )
+        return 0
+
+    if args.command == "raw-verify":
+        receipt = verify_raw_receipt(args.raw_root, args.manifest)
+        print(
+            "Raw receipt verified: "
+            f"receipt_id={receipt.receipt_id}, dataset={receipt.dataset}, "
+            f"sha256={receipt.sha256}, size={receipt.size_bytes}, "
+            f"manifest_sha256={receipt.manifest_sha256}"
+        )
+        return 0
+
     if args.command == "database-migrate":
         with connect_database(_database_url(args.database_url)) as connection:
             summary = migrate_database(
@@ -264,20 +317,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "validate-dataset":
         output_directory = args.output_dir or _default_output_directory(args.dataset)
-        validation_summary = run_dataset_validation(
+        summary = run_dataset_validation(
             args.dataset,
             args.input,
             output_directory,
+            raw_root=args.raw_root,
             reference_date=args.reference_date,
         )
         print(
-            f"{validation_summary.dataset} validation completed: "
-            f"run_id={validation_summary.run_id}, "
-            f"contract={validation_summary.contract_version}, "
-            f"received={validation_summary.rows_received}, "
-            f"valid={validation_summary.rows_valid}, "
-            f"invalid={validation_summary.rows_invalid}, "
-            f"errors={validation_summary.validation_errors}"
+            f"{summary.dataset} validation completed: "
+            f"run_id={summary.run_id}, raw_receipt_id={summary.raw_receipt_id}, "
+            f"contract={summary.contract_version}, received={summary.rows_received}, "
+            f"valid={summary.rows_valid}, invalid={summary.rows_invalid}, "
+            f"errors={summary.validation_errors}"
         )
         return 0
 
@@ -285,18 +337,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_directory = args.output_dir or _default_output_directory(args.dataset)
         with connect_database(_database_url(args.database_url)) as connection:
             migrate_database(connection, baseline_existing=args.baseline_existing)
-            persistence_summary = persist_dataset_validation_outputs(
+            summary = persist_dataset_validation_outputs(
                 connection,
                 args.dataset,
                 output_directory,
+                raw_root=args.raw_root,
             )
         print(
-            f"{persistence_summary.dataset} persistence completed: "
-            f"run_id={persistence_summary.run_id}, "
-            f"contract={persistence_summary.contract_version}, "
-            f"already_loaded={persistence_summary.already_loaded}, "
-            f"records={persistence_summary.records_upserted}, "
-            f"errors={persistence_summary.validation_errors_inserted}"
+            f"{summary.dataset} persistence completed: "
+            f"run_id={summary.run_id}, contract={summary.contract_version}, "
+            f"already_loaded={summary.already_loaded}, "
+            f"records={summary.records_upserted}, "
+            f"errors={summary.validation_errors_inserted}"
         )
         return 0
 
@@ -329,6 +381,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             "Demo completed: "
             f"patient_run_id={demo_summary.patient_run_id}, "
+            f"patient_raw_receipt_id={demo_summary.raw_receipt_ids['patients']}, "
             f"cohort_run_id={demo_summary.cohort.cohort_run_id}, "
             f"cohort_rows={demo_summary.cohort.row_count}"
         )
