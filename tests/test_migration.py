@@ -12,7 +12,6 @@ from clinical_data_platform.migration import (
     validate_database_migrations,
 )
 
-
 EXPECTED_MIGRATIONS = [
     "V001__create_core_clinical_schema.sql",
     "V002__add_longitudinal_entities_and_cohorts.sql",
