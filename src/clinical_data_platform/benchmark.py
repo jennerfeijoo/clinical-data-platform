@@ -14,7 +14,7 @@ import sys
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from time import perf_counter_ns
 from typing import Any, Literal
@@ -95,7 +95,7 @@ class BenchmarkArtifacts:
 
 
 def _iso(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _canonical_json(value: object) -> bytes:
@@ -147,7 +147,7 @@ def generate_benchmark_workload(patient_count: int, seed: int) -> BenchmarkWorkl
             },
         )
 
-        first_start = datetime(2025, 1, 1, 8, tzinfo=timezone.utc) + timedelta(
+        first_start = datetime(2025, 1, 1, 8, tzinfo=UTC) + timedelta(
             days=index % 480,
             hours=index % 8,
         )
@@ -336,7 +336,7 @@ def _register_benchmark_runs(
     trial_label: str,
 ) -> dict[str, UUID]:
     run_ids = _benchmark_run_ids(workload, trial_label)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with connection.transaction():
         for dataset in dataset_names():
             contract = get_dataset_definition(dataset).contract
@@ -728,8 +728,14 @@ def _write_summary_markdown(path: Path, report: Mapping[str, Any]) -> None:
         "- COPY uses temporary staging plus set-based merge.",
         "- Reference uses psycopg `executemany` with the equivalent upsert.",
         "- Warm-up per method; measured method order alternates by repetition.",
-        "- Timing includes row conversion, transfer, triggers, constraints, merge/upsert and commit.",
-        "- Timing excludes generation, raw capture, contract validation, audit registration and verification queries.",
+        (
+            "- Timing includes row conversion, transfer, triggers, constraints, "
+            "merge/upsert and commit."
+        ),
+        (
+            "- Timing excludes generation, raw capture, contract validation, "
+            "audit registration and verification queries."
+        ),
         "",
         "## Configuration",
         "",
@@ -751,7 +757,10 @@ def _write_summary_markdown(path: Path, report: Mapping[str, Any]) -> None:
         "",
         "## Aggregate results",
         "",
-        "| Patients | Clinical rows | Method | n | Median ms | Min ms | Max ms | Median rows/s |",
+        (
+            "| Patients | Clinical rows | Method | n | Median ms | Min ms | "
+            "Max ms | Median rows/s |"
+        ),
         "|---:|---:|---|---:|---:|---:|---:|---:|",
     ]
     for item in aggregates:
@@ -768,7 +777,10 @@ def _write_summary_markdown(path: Path, report: Mapping[str, Any]) -> None:
             "",
             "## COPY comparison",
             "",
-            "| Patients | Clinical rows | COPY median ms | executemany median ms | COPY speedup | Elapsed reduction |",
+            (
+                "| Patients | Clinical rows | COPY median ms | executemany median ms | "
+                "COPY speedup | Elapsed reduction |"
+            ),
             "|---:|---:|---:|---:|---:|---:|",
         ]
     )
@@ -784,12 +796,27 @@ def _write_summary_markdown(path: Path, report: Mapping[str, Any]) -> None:
             "",
             "## Interpretation limits",
             "",
-            "- Environment-specific engineering measurements, not universal PostgreSQL constants.",
+            (
+                "- Environment-specific engineering measurements, not universal "
+                "PostgreSQL constants."
+            ),
             "- GitHub-hosted runner hardware and contention can vary between runs.",
-            "- `executemany` is the previous application reference path, not every batching strategy.",
-            "- Initial governed loading only; no updates, concurrency or end-to-end pipeline latency.",
-            "- No peak-memory claim because Python allocation tracking omits PostgreSQL and native-driver memory.",
-            "- Descriptive medians only; the repetition count does not support inferential confidence intervals.",
+            (
+                "- `executemany` is the previous application reference path, not "
+                "every batching strategy."
+            ),
+            (
+                "- Initial governed loading only; no updates, concurrency or "
+                "end-to-end pipeline latency."
+            ),
+            (
+                "- No peak-memory claim because Python allocation tracking omits "
+                "PostgreSQL and native-driver memory."
+            ),
+            (
+                "- Descriptive medians only; the repetition count does not support "
+                "inferential confidence intervals."
+            ),
             "",
         ]
     )
@@ -847,7 +874,7 @@ def run_loading_benchmark(
     comparisons = _comparisons(aggregates)
     report: dict[str, Any] = {
         "schema_version": BENCHMARK_SCHEMA_VERSION,
-        "generated_at": _iso(datetime.now(timezone.utc)),
+        "generated_at": _iso(datetime.now(UTC)),
         "configuration": {
             "patient_counts": list(effective.patient_counts),
             "repetitions": effective.repetitions,
