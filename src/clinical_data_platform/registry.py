@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import date, datetime
 from uuid import UUID
 
+from clinical_data_platform.bulk import CopyMergePlan
 from clinical_data_platform.contract import (
     ContractDefinitionError,
     DatasetContract,
@@ -16,8 +17,8 @@ from clinical_data_platform.contract import (
 from clinical_data_platform.models import ClinicalRecord
 
 RowBuilder = Callable[
-    [list[ClinicalRecord], UUID, str],
-    list[tuple[object, ...]],
+    [Iterable[ClinicalRecord], UUID, str],
+    Iterator[tuple[object, ...]],
 ]
 
 
@@ -27,7 +28,7 @@ class DatasetDefinition:
 
     name: str
     row_builder: RowBuilder
-    upsert_sql: str
+    copy_plan: CopyMergePlan
 
     @property
     def contract(self) -> DatasetContract:
@@ -61,34 +62,30 @@ def _optional_text(value: str) -> str | None:
 
 
 def _patient_rows(
-    records: list[ClinicalRecord],
+    records: Iterable[ClinicalRecord],
     run_id: UUID,
     source_sha256: str,
-) -> list[tuple[object, ...]]:
-    rows: list[tuple[object, ...]] = []
+) -> Iterator[tuple[object, ...]]:
     for record in records:
         death_date_text = record["death_date"].strip()
-        rows.append(
-            (
-                record["patient_id"].strip(),
-                record["sex_at_birth"].strip(),
-                date.fromisoformat(record["birth_date"].strip()),
-                date.fromisoformat(death_date_text) if death_date_text else None,
-                record["source_system"].strip(),
-                run_id,
-                source_sha256,
-            )
+        yield (
+            record["patient_id"].strip(),
+            record["sex_at_birth"].strip(),
+            date.fromisoformat(record["birth_date"].strip()),
+            date.fromisoformat(death_date_text) if death_date_text else None,
+            record["source_system"].strip(),
+            run_id,
+            source_sha256,
         )
-    return rows
 
 
 def _encounter_rows(
-    records: list[ClinicalRecord],
+    records: Iterable[ClinicalRecord],
     run_id: UUID,
     source_sha256: str,
-) -> list[tuple[object, ...]]:
-    return [
-        (
+) -> Iterator[tuple[object, ...]]:
+    for record in records:
+        yield (
             record["encounter_id"].strip(),
             record["patient_id"].strip(),
             record["encounter_type"].strip(),
@@ -98,17 +95,15 @@ def _encounter_rows(
             run_id,
             source_sha256,
         )
-        for record in records
-    ]
 
 
 def _diagnosis_rows(
-    records: list[ClinicalRecord],
+    records: Iterable[ClinicalRecord],
     run_id: UUID,
     source_sha256: str,
-) -> list[tuple[object, ...]]:
-    return [
-        (
+) -> Iterator[tuple[object, ...]]:
+    for record in records:
+        yield (
             record["diagnosis_id"].strip(),
             record["patient_id"].strip(),
             record["encounter_id"].strip(),
@@ -119,17 +114,15 @@ def _diagnosis_rows(
             run_id,
             source_sha256,
         )
-        for record in records
-    ]
 
 
 def _observation_rows(
-    records: list[ClinicalRecord],
+    records: Iterable[ClinicalRecord],
     run_id: UUID,
     source_sha256: str,
-) -> list[tuple[object, ...]]:
-    return [
-        (
+) -> Iterator[tuple[object, ...]]:
+    for record in records:
+        yield (
             record["observation_id"].strip(),
             record["patient_id"].strip(),
             record["encounter_id"].strip(),
@@ -141,17 +134,15 @@ def _observation_rows(
             run_id,
             source_sha256,
         )
-        for record in records
-    ]
 
 
 def _medication_rows(
-    records: list[ClinicalRecord],
+    records: Iterable[ClinicalRecord],
     run_id: UUID,
     source_sha256: str,
-) -> list[tuple[object, ...]]:
-    return [
-        (
+) -> Iterator[tuple[object, ...]]:
+    for record in records:
+        yield (
             record["medication_id"].strip(),
             record["patient_id"].strip(),
             record["encounter_id"].strip(),
@@ -167,17 +158,15 @@ def _medication_rows(
             run_id,
             source_sha256,
         )
-        for record in records
-    ]
 
 
 def _procedure_rows(
-    records: list[ClinicalRecord],
+    records: Iterable[ClinicalRecord],
     run_id: UUID,
     source_sha256: str,
-) -> list[tuple[object, ...]]:
-    return [
-        (
+) -> Iterator[tuple[object, ...]]:
+    for record in records:
+        yield (
             record["procedure_id"].strip(),
             record["patient_id"].strip(),
             record["encounter_id"].strip(),
@@ -189,158 +178,215 @@ def _procedure_rows(
             run_id,
             source_sha256,
         )
-        for record in records
-    ]
 
 
-PATIENT_UPSERT_SQL = """
-    INSERT INTO clinical.patients (
-        patient_id, sex_at_birth, birth_date, death_date, source_system,
-        source_run_id, source_sha256
-    )
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (patient_id) DO UPDATE SET
-        sex_at_birth = EXCLUDED.sex_at_birth,
-        birth_date = EXCLUDED.birth_date,
-        death_date = EXCLUDED.death_date,
-        source_system = EXCLUDED.source_system,
-        source_run_id = EXCLUDED.source_run_id,
-        source_sha256 = EXCLUDED.source_sha256,
-        loaded_at = CURRENT_TIMESTAMP
-"""
+PATIENT_COPY_PLAN = CopyMergePlan(
+    schema="clinical",
+    table="patients",
+    columns=(
+        "patient_id",
+        "sex_at_birth",
+        "birth_date",
+        "death_date",
+        "source_system",
+        "source_run_id",
+        "source_sha256",
+    ),
+    conflict_columns=("patient_id",),
+    update_columns=(
+        "sex_at_birth",
+        "birth_date",
+        "death_date",
+        "source_system",
+        "source_run_id",
+        "source_sha256",
+    ),
+    touch_loaded_at=True,
+)
 
-ENCOUNTER_UPSERT_SQL = """
-    INSERT INTO clinical.encounters (
-        encounter_id, patient_id, encounter_type, start_datetime,
-        end_datetime, source_system, source_run_id, source_sha256
-    )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (encounter_id) DO UPDATE SET
-        patient_id = EXCLUDED.patient_id,
-        encounter_type = EXCLUDED.encounter_type,
-        start_datetime = EXCLUDED.start_datetime,
-        end_datetime = EXCLUDED.end_datetime,
-        source_system = EXCLUDED.source_system,
-        source_run_id = EXCLUDED.source_run_id,
-        source_sha256 = EXCLUDED.source_sha256,
-        loaded_at = CURRENT_TIMESTAMP
-"""
+ENCOUNTER_COPY_PLAN = CopyMergePlan(
+    schema="clinical",
+    table="encounters",
+    columns=(
+        "encounter_id",
+        "patient_id",
+        "encounter_type",
+        "start_datetime",
+        "end_datetime",
+        "source_system",
+        "source_run_id",
+        "source_sha256",
+    ),
+    conflict_columns=("encounter_id",),
+    update_columns=(
+        "patient_id",
+        "encounter_type",
+        "start_datetime",
+        "end_datetime",
+        "source_system",
+        "source_run_id",
+        "source_sha256",
+    ),
+    touch_loaded_at=True,
+)
 
-DIAGNOSIS_UPSERT_SQL = """
-    INSERT INTO clinical.diagnoses (
-        diagnosis_id, patient_id, encounter_id, code_system,
-        diagnosis_code, diagnosis_datetime, source_system,
-        source_run_id, source_sha256
-    )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (diagnosis_id) DO UPDATE SET
-        patient_id = EXCLUDED.patient_id,
-        encounter_id = EXCLUDED.encounter_id,
-        code_system = EXCLUDED.code_system,
-        diagnosis_code = EXCLUDED.diagnosis_code,
-        diagnosis_datetime = EXCLUDED.diagnosis_datetime,
-        source_system = EXCLUDED.source_system,
-        source_run_id = EXCLUDED.source_run_id,
-        source_sha256 = EXCLUDED.source_sha256,
-        loaded_at = CURRENT_TIMESTAMP
-"""
+DIAGNOSIS_COPY_PLAN = CopyMergePlan(
+    schema="clinical",
+    table="diagnoses",
+    columns=(
+        "diagnosis_id",
+        "patient_id",
+        "encounter_id",
+        "code_system",
+        "diagnosis_code",
+        "diagnosis_datetime",
+        "source_system",
+        "source_run_id",
+        "source_sha256",
+    ),
+    conflict_columns=("diagnosis_id",),
+    update_columns=(
+        "patient_id",
+        "encounter_id",
+        "code_system",
+        "diagnosis_code",
+        "diagnosis_datetime",
+        "source_system",
+        "source_run_id",
+        "source_sha256",
+    ),
+    touch_loaded_at=True,
+)
 
-OBSERVATION_UPSERT_SQL = """
-    INSERT INTO clinical.observations (
-        observation_id, patient_id, encounter_id, observation_code,
-        value_numeric, unit, observed_at, source_system,
-        source_run_id, source_sha256
-    )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (observation_id) DO UPDATE SET
-        patient_id = EXCLUDED.patient_id,
-        encounter_id = EXCLUDED.encounter_id,
-        observation_code = EXCLUDED.observation_code,
-        value_numeric = EXCLUDED.value_numeric,
-        unit = EXCLUDED.unit,
-        observed_at = EXCLUDED.observed_at,
-        source_system = EXCLUDED.source_system,
-        source_run_id = EXCLUDED.source_run_id,
-        source_sha256 = EXCLUDED.source_sha256,
-        loaded_at = CURRENT_TIMESTAMP
-"""
+OBSERVATION_COPY_PLAN = CopyMergePlan(
+    schema="clinical",
+    table="observations",
+    columns=(
+        "observation_id",
+        "patient_id",
+        "encounter_id",
+        "observation_code",
+        "value_numeric",
+        "unit",
+        "observed_at",
+        "source_system",
+        "source_run_id",
+        "source_sha256",
+    ),
+    conflict_columns=("observation_id",),
+    update_columns=(
+        "patient_id",
+        "encounter_id",
+        "observation_code",
+        "value_numeric",
+        "unit",
+        "observed_at",
+        "source_system",
+        "source_run_id",
+        "source_sha256",
+    ),
+    touch_loaded_at=True,
+)
 
-MEDICATION_UPSERT_SQL = """
-    INSERT INTO clinical.medications (
-        medication_id, patient_id, encounter_id, code_system,
-        medication_code, status, start_datetime, end_datetime,
-        dose_value, dose_unit, route, source_system,
-        source_run_id, source_sha256
-    )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (medication_id) DO UPDATE SET
-        patient_id = EXCLUDED.patient_id,
-        encounter_id = EXCLUDED.encounter_id,
-        code_system = EXCLUDED.code_system,
-        medication_code = EXCLUDED.medication_code,
-        status = EXCLUDED.status,
-        start_datetime = EXCLUDED.start_datetime,
-        end_datetime = EXCLUDED.end_datetime,
-        dose_value = EXCLUDED.dose_value,
-        dose_unit = EXCLUDED.dose_unit,
-        route = EXCLUDED.route,
-        source_system = EXCLUDED.source_system,
-        source_run_id = EXCLUDED.source_run_id,
-        source_sha256 = EXCLUDED.source_sha256,
-        loaded_at = CURRENT_TIMESTAMP
-"""
+MEDICATION_COPY_PLAN = CopyMergePlan(
+    schema="clinical",
+    table="medications",
+    columns=(
+        "medication_id",
+        "patient_id",
+        "encounter_id",
+        "code_system",
+        "medication_code",
+        "status",
+        "start_datetime",
+        "end_datetime",
+        "dose_value",
+        "dose_unit",
+        "route",
+        "source_system",
+        "source_run_id",
+        "source_sha256",
+    ),
+    conflict_columns=("medication_id",),
+    update_columns=(
+        "patient_id",
+        "encounter_id",
+        "code_system",
+        "medication_code",
+        "status",
+        "start_datetime",
+        "end_datetime",
+        "dose_value",
+        "dose_unit",
+        "route",
+        "source_system",
+        "source_run_id",
+        "source_sha256",
+    ),
+    touch_loaded_at=True,
+)
 
-PROCEDURE_UPSERT_SQL = """
-    INSERT INTO clinical.procedures (
-        procedure_id, patient_id, encounter_id, code_system,
-        procedure_code, procedure_datetime, status, source_system,
-        source_run_id, source_sha256
-    )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (procedure_id) DO UPDATE SET
-        patient_id = EXCLUDED.patient_id,
-        encounter_id = EXCLUDED.encounter_id,
-        code_system = EXCLUDED.code_system,
-        procedure_code = EXCLUDED.procedure_code,
-        procedure_datetime = EXCLUDED.procedure_datetime,
-        status = EXCLUDED.status,
-        source_system = EXCLUDED.source_system,
-        source_run_id = EXCLUDED.source_run_id,
-        source_sha256 = EXCLUDED.source_sha256,
-        loaded_at = CURRENT_TIMESTAMP
-"""
+PROCEDURE_COPY_PLAN = CopyMergePlan(
+    schema="clinical",
+    table="procedures",
+    columns=(
+        "procedure_id",
+        "patient_id",
+        "encounter_id",
+        "code_system",
+        "procedure_code",
+        "procedure_datetime",
+        "status",
+        "source_system",
+        "source_run_id",
+        "source_sha256",
+    ),
+    conflict_columns=("procedure_id",),
+    update_columns=(
+        "patient_id",
+        "encounter_id",
+        "code_system",
+        "procedure_code",
+        "procedure_datetime",
+        "status",
+        "source_system",
+        "source_run_id",
+        "source_sha256",
+    ),
+    touch_loaded_at=True,
+)
 
 
 DATASET_REGISTRY: dict[str, DatasetDefinition] = {
     "patients": DatasetDefinition(
         name="patients",
         row_builder=_patient_rows,
-        upsert_sql=PATIENT_UPSERT_SQL,
+        copy_plan=PATIENT_COPY_PLAN,
     ),
     "encounters": DatasetDefinition(
         name="encounters",
         row_builder=_encounter_rows,
-        upsert_sql=ENCOUNTER_UPSERT_SQL,
+        copy_plan=ENCOUNTER_COPY_PLAN,
     ),
     "diagnoses": DatasetDefinition(
         name="diagnoses",
         row_builder=_diagnosis_rows,
-        upsert_sql=DIAGNOSIS_UPSERT_SQL,
+        copy_plan=DIAGNOSIS_COPY_PLAN,
     ),
     "observations": DatasetDefinition(
         name="observations",
         row_builder=_observation_rows,
-        upsert_sql=OBSERVATION_UPSERT_SQL,
+        copy_plan=OBSERVATION_COPY_PLAN,
     ),
     "medications": DatasetDefinition(
         name="medications",
         row_builder=_medication_rows,
-        upsert_sql=MEDICATION_UPSERT_SQL,
+        copy_plan=MEDICATION_COPY_PLAN,
     ),
     "procedures": DatasetDefinition(
         name="procedures",
         row_builder=_procedure_rows,
-        upsert_sql=PROCEDURE_UPSERT_SQL,
+        copy_plan=PROCEDURE_COPY_PLAN,
     ),
 }
 
