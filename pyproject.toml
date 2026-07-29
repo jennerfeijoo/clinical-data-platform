@@ -4,16 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clinical-data-platform"
-version = "0.1.0"
-description = "A work-in-progress clinical data engineering project using synthetic healthcare data."
+version = "0.2.0"
+description = "A reproducible clinical data engineering MVP using synthetic healthcare data."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
 authors = [
     { name = "Jenner Feijoo" }
 ]
+keywords = ["clinical-data", "data-engineering", "healthcare", "postgresql", "cohort"]
 dependencies = [
     "psycopg[binary]>=3.2,<4"
 ]
+
+[project.urls]
+Repository = "https://github.com/jennerfeijoo/clinical-data-platform"
 
 [project.scripts]
 clinical-data = "clinical_data_platform.cli:main"
