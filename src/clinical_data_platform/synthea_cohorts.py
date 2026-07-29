@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import re
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ COHORT_COMPARISON_SCHEMA_VERSION: Final = "1.0.0"
 COHORT_LOAD_MANIFEST_VERSION: Final = "1.0.0"
 DEFAULT_COHORT_A_PROFILE: Final = "synthea-us-small-v1"
 DEFAULT_COHORT_B_PROFILE: Final = "synthea-us-small-cohort-b-v1"
+COHORT_LABEL_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 
 PACKAGED_PROFILE_RESOURCES: Final[dict[str, str]] = {
     DEFAULT_COHORT_A_PROFILE: "reproducible_small.toml",
@@ -122,6 +124,16 @@ def load_packaged_synthea_profile(name: str) -> SyntheaProfile:
     return profile
 
 
+def _normalize_cohort_label(label: str) -> str:
+    normalized = label.strip()
+    if not COHORT_LABEL_PATTERN.fullmatch(normalized):
+        raise SyntheaCohortError(
+            "Cohort labels must be safe single path components matching "
+            "^[a-z][a-z0-9_-]{0,63}$."
+        )
+    return normalized
+
+
 def _sha256_bytes(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
@@ -202,8 +214,7 @@ def _cohort_material(
     profile_name: str,
     normalized_directory: Path,
 ) -> _CohortMaterial:
-    if not label.strip():
-        raise SyntheaCohortError("Cohort labels must be non-empty.")
+    normalized_label = _normalize_cohort_label(label)
     profile = load_packaged_synthea_profile(profile_name)
     adaptation = verify_synthea_adaptation(
         normalized_directory,
@@ -220,7 +231,7 @@ def _cohort_material(
                 f"Identifier count for {dataset!r} is {len(values)}; expected {expected}."
             )
     snapshot = SyntheaCohortSnapshot(
-        label=label.strip(),
+        label=normalized_label,
         profile_name=profile.name,
         profile_sha256=profile.sha256,
         random_seed=profile.random_seed,
@@ -334,18 +345,20 @@ def compare_synthea_cohorts(
     replace: bool = False,
 ) -> SyntheaCohortComparisonSummary:
     """Verify two matched-design adaptations and prove identifier-level independence."""
-    if cohort_a_label.strip() == cohort_b_label.strip():
-        raise SyntheaCohortError("Cohort labels must be distinct.")
+    normalized_a_label = _normalize_cohort_label(cohort_a_label)
+    normalized_b_label = _normalize_cohort_label(cohort_b_label)
+    if normalized_a_label == normalized_b_label:
+        raise SyntheaCohortError("Cohort labels must be distinct after normalization.")
     if cohort_a_profile_name == cohort_b_profile_name:
         raise SyntheaCohortError("Independent cohorts must use distinct profiles.")
 
     cohort_a = _cohort_material(
-        cohort_a_label,
+        normalized_a_label,
         cohort_a_profile_name,
         cohort_a_directory,
     )
     cohort_b = _cohort_material(
-        cohort_b_label,
+        normalized_b_label,
         cohort_b_profile_name,
         cohort_b_directory,
     )
@@ -488,13 +501,15 @@ def load_synthea_cohort_pair(
         cohort_b_label=cohort_b_label,
         replace=replace_comparison,
     )
+    normalized_a_label = comparison.cohort_a.label
+    normalized_b_label = comparison.cohort_b.label
     material_a = _cohort_material(
-        cohort_a_label,
+        normalized_a_label,
         cohort_a_profile_name,
         cohort_a_directory,
     )
     material_b = _cohort_material(
-        cohort_b_label,
+        normalized_b_label,
         cohort_b_profile_name,
         cohort_b_directory,
     )
@@ -506,14 +521,14 @@ def load_synthea_cohort_pair(
     cohort_a_load = load_adapted_synthea_dataset(
         connection,
         cohort_a_directory,
-        processed_root / cohort_a_label,
+        processed_root / normalized_a_label,
         raw_root=raw_root,
         profile=material_a.profile,
     )
     cohort_b_load = load_adapted_synthea_dataset(
         connection,
         cohort_b_directory,
-        processed_root / cohort_b_label,
+        processed_root / normalized_b_label,
         raw_root=raw_root,
         profile=material_b.profile,
     )
@@ -522,8 +537,8 @@ def load_synthea_cohort_pair(
         "manifest_version": COHORT_LOAD_MANIFEST_VERSION,
         "comparison_fingerprint": comparison.comparison_fingerprint,
         "cohorts": {
-            cohort_a_label: _load_summary_document(cohort_a_load),
-            cohort_b_label: _load_summary_document(cohort_b_load),
+            normalized_a_label: _load_summary_document(cohort_a_load),
+            normalized_b_label: _load_summary_document(cohort_b_load),
         },
     }
     load_execution_fingerprint = _canonical_json_sha256(load_identity)
