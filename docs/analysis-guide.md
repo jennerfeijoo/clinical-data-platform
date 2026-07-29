@@ -16,7 +16,7 @@ POSIX shell:
 sh scripts/run_demo.sh
 ```
 
-The workflow validates four datasets, loads PostgreSQL, builds the hypertension cohort, and exports analysis-ready features.
+The workflow validates four registered datasets, loads PostgreSQL, builds the hypertension cohort, and exports analysis-ready features.
 
 ## 2. Inspect file-level quality outputs
 
@@ -30,16 +30,40 @@ data/processed/
 └── observations/
 ```
 
-Each directory contains valid rows, rejected rows, structured validation errors, and a JSON quality report.
+Each directory contains valid rows, rejected rows, structured validation errors, and a JSON quality report. The output convention is identical because every dataset runs through the same `run_dataset_validation()` function.
 
 Questions to evaluate:
 
 - Are rejected records preserved?
-- Can every error be linked to a row, field, rule, and rejected value?
+- Can every error be linked to a row, entity, patient, field, rule, and rejected value?
 - Do reported counts match the generated files?
 - Does each report include a run UUID and source checksum?
+- Does adding a dataset require modifying the pipeline, or only registering a definition?
 
-## 3. Inspect PostgreSQL
+## 3. Inspect the generic architecture
+
+Read these files in order:
+
+1. `src/clinical_data_platform/models.py`
+2. `src/clinical_data_platform/registry.py`
+3. `src/clinical_data_platform/pipeline.py`
+4. `src/clinical_data_platform/database.py`
+5. `src/clinical_data_platform/validation.py`
+6. `src/clinical_data_platform/clinical_entities.py`
+
+The separation is intentional:
+
+- `models.py` defines normalized cross-dataset results;
+- `registry.py` describes what changes between datasets;
+- `pipeline.py` implements the invariant validation workflow;
+- `database.py` implements the invariant persistence workflow;
+- validation modules contain dataset-specific clinical rules.
+
+The central review question is: **where should variation live, and where should behavior remain invariant?**
+
+See `docs/learning/generic-dataset-architecture-es.md` for a detailed Spanish study guide and exercises.
+
+## 4. Inspect PostgreSQL
 
 Open a database shell:
 
@@ -97,7 +121,7 @@ GROUP BY p.dataset_name, e.rule_name
 ORDER BY p.dataset_name, e.rule_name;
 ```
 
-## 4. Inspect the analytical cohort
+## 5. Inspect the analytical cohort
 
 ```sql
 SELECT *
@@ -124,7 +148,7 @@ JOIN audit.pipeline_runs AS p ON p.run_id = s.source_run_id
 ORDER BY c.generated_at, p.dataset_name;
 ```
 
-## 5. Inspect exported analysis files
+## 6. Inspect exported analysis files
 
 ```text
 data/analytics/
@@ -134,23 +158,29 @@ data/analytics/
 
 The CSV is the analysis-ready table. The JSON file records its definition version, parameters, source runs, row count, and generation time.
 
-## 6. Review engineering decisions
+## 7. Review engineering decisions
 
-Recommended review order:
+Recommended full review order:
 
 1. `docs/architecture.md`
-2. `docs/data-contracts/`
-3. `src/clinical_data_platform/clinical_entities.py`
-4. `src/clinical_data_platform/entity_pipeline.py`
-5. `src/clinical_data_platform/entity_database.py`
-6. `sql/schema.sql`
-7. `sql/cohorts/hypertension.sql`
-8. `src/clinical_data_platform/cohort.py`
-9. `tests/test_analysis_workflow.py`
-10. `.github/workflows/ci.yml`
+2. `docs/learning/generic-dataset-architecture-es.md`
+3. `src/clinical_data_platform/models.py`
+4. `src/clinical_data_platform/registry.py`
+5. `src/clinical_data_platform/pipeline.py`
+6. `src/clinical_data_platform/database.py`
+7. `src/clinical_data_platform/validation.py`
+8. `src/clinical_data_platform/clinical_entities.py`
+9. `sql/schema.sql`
+10. `sql/cohorts/hypertension.sql`
+11. `tests/test_registry.py`
+12. `tests/test_analysis_workflow.py`
+13. `.github/workflows/ci.yml`
 
 Key design questions:
 
+- Why is the patient dataset no longer handled by a separate pipeline?
+- What behavior belongs in `DatasetDefinition`?
+- Why are validation errors normalized before the pipeline writes them?
 - Which checks belong in Python and which belong in PostgreSQL?
 - Is run-level idempotency sufficient, or should content-level deduplication also be implemented?
 - Should cohort outputs be snapshots, views, or materialized views?
@@ -158,10 +188,11 @@ Key design questions:
 - How would controlled vocabularies and unit conversion be introduced?
 - What additional observability would be required in production?
 
-## 7. Known limitations
+## 8. Known limitations
 
-- tiny synthetic dataset;
+- small synthetic dataset;
 - only four clinical entities;
+- registry definitions are executable Python rather than declarative contracts;
 - limited terminology support;
 - no authentication or authorization;
 - no PHI handling;
@@ -170,4 +201,4 @@ Key design questions:
 - no production monitoring or alerting;
 - one demonstrative cohort rather than a generic cohort-definition language.
 
-These constraints are explicit so the repository demonstrates a complete, reviewable MVP without claiming production clinical readiness.
+These constraints remain explicit while the repository progresses toward a defensible version `1.0.0`.
