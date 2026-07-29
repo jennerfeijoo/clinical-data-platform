@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import csv
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,7 +29,7 @@ def _validate_csv_path(path: Path) -> None:
         raise DatasetReadError(f"Expected a CSV file, received: {path.suffix or '<none>'}")
 
 
-def _validated_columns(fieldnames: list[str] | None) -> tuple[str, ...]:
+def _validated_columns(fieldnames: Sequence[str] | None) -> tuple[str, ...]:
     if fieldnames is None:
         raise DatasetReadError("The CSV file does not contain a header row.")
     columns = tuple(field.strip() for field in fieldnames)
