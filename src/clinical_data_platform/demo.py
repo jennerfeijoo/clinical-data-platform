@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -15,6 +16,14 @@ from clinical_data_platform.database import (
 from clinical_data_platform.migration import migrate_database
 from clinical_data_platform.pipeline import run_dataset_validation
 from clinical_data_platform.registry import dataset_names
+from clinical_data_platform.structured_logging import (
+    emit_log,
+    ensure_correlation_id,
+    get_logger,
+    log_operation,
+)
+
+LOGGER = get_logger("demo")
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,40 +53,102 @@ def run_demo(
     processed_directory = repository_root / "data" / "processed"
     analytics_directory = repository_root / "data" / "analytics"
     cohort_sql_path = repository_root / "sql" / "cohorts" / "hypertension.sql"
+    datasets = dataset_names()
 
-    validation_summaries = {
-        dataset: run_dataset_validation(
-            dataset,
-            sample_directory / f"{dataset}.csv",
-            processed_directory / dataset,
-            raw_root=raw_directory,
-            reference_date=reference_date,
+    with ensure_correlation_id():
+        emit_log(
+            LOGGER,
+            logging.INFO,
+            "demo.run.started",
+            "Started complete synthetic-data demonstration.",
+            dataset_count=len(datasets),
+            reference_date=reference_date.isoformat(),
+            baseline_existing=baseline_existing,
         )
-        for dataset in dataset_names()
-    }
-
-    with connect_database(database_url) as connection:
-        migrate_database(connection, baseline_existing=baseline_existing)
-        for dataset in dataset_names():
-            persist_dataset_validation_outputs(
-                connection,
-                dataset,
-                processed_directory / dataset,
-                raw_root=raw_directory,
+        with log_operation(
+            LOGGER,
+            "demo.validation",
+            operation="validate_all_datasets",
+            stage="validation",
+            dataset_count=len(datasets),
+        ) as validation_log:
+            validation_summaries = {
+                dataset: run_dataset_validation(
+                    dataset,
+                    sample_directory / f"{dataset}.csv",
+                    processed_directory / dataset,
+                    raw_root=raw_directory,
+                    reference_date=reference_date,
+                )
+                for dataset in datasets
+            }
+            validation_log["validated_dataset_count"] = len(validation_summaries)
+            validation_log["rows_valid"] = sum(
+                summary.rows_valid for summary in validation_summaries.values()
             )
-        cohort_summary = build_hypertension_cohort(
-            connection,
-            cohort_sql_path,
-            analytics_directory,
-        )
+            validation_log["rows_invalid"] = sum(
+                summary.rows_invalid for summary in validation_summaries.values()
+            )
 
-    return DemoSummary(
-        dataset_run_ids={
-            dataset: summary.run_id for dataset, summary in validation_summaries.items()
-        },
-        raw_receipt_ids={
-            dataset: summary.raw_receipt_id
-            for dataset, summary in validation_summaries.items()
-        },
-        cohort=cohort_summary,
-    )
+        with connect_database(database_url) as connection:
+            with log_operation(
+                LOGGER,
+                "demo.migration",
+                operation="migrate_database",
+                stage="migration",
+            ) as migration_log:
+                migration_summary = migrate_database(
+                    connection,
+                    baseline_existing=baseline_existing,
+                )
+                migration_log["previous_version"] = migration_summary.previous_version
+                migration_log["current_version"] = migration_summary.current_version
+                migration_log["applied_versions"] = migration_summary.applied_versions
+
+            with log_operation(
+                LOGGER,
+                "demo.persistence",
+                operation="persist_all_datasets",
+                stage="persistence",
+                dataset_count=len(datasets),
+            ) as persistence_log:
+                persistence_summaries = {
+                    dataset: persist_dataset_validation_outputs(
+                        connection,
+                        dataset,
+                        processed_directory / dataset,
+                        raw_root=raw_directory,
+                    )
+                    for dataset in datasets
+                }
+                persistence_log["persisted_dataset_count"] = len(persistence_summaries)
+                persistence_log["records_persisted"] = sum(
+                    summary.records_upserted for summary in persistence_summaries.values()
+                )
+
+            cohort_summary = build_hypertension_cohort(
+                connection,
+                cohort_sql_path,
+                analytics_directory,
+            )
+
+        emit_log(
+            LOGGER,
+            logging.INFO,
+            "demo.run.completed",
+            "Completed complete synthetic-data demonstration.",
+            outcome="success",
+            dataset_count=len(datasets),
+            cohort_row_count=cohort_summary.row_count,
+        )
+        return DemoSummary(
+            dataset_run_ids={
+                dataset: summary.run_id
+                for dataset, summary in validation_summaries.items()
+            },
+            raw_receipt_ids={
+                dataset: summary.raw_receipt_id
+                for dataset, summary in validation_summaries.items()
+            },
+            cohort=cohort_summary,
+        )
