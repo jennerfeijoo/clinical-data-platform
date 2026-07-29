@@ -42,30 +42,32 @@ Version `0.19.0` adds independent controls for different risk surfaces:
 
 | Surface | Control | Blocking policy |
 |---|---|---|
-| Installed Python dependencies | `pip-audit` | Known vulnerabilities fail the job. |
-| Python source patterns | Bandit | Findings with at least medium severity and confidence fail the job. |
+| Resolved Python environment | `pip-audit` | Known vulnerabilities fail every pull request, push, scheduled scan, and manual run. |
+| Python source patterns | Bandit | New findings with at least medium severity and confidence fail the job. |
 | Python data flows | CodeQL `security-extended` | Results are published to GitHub code scanning. |
-| Pull-request dependency changes | Dependency Review Action | Newly introduced high or critical vulnerabilities fail the pull request. |
 | Built container image | Trivy | Fixed high or critical OS/library vulnerabilities fail the job. |
 | Dependency freshness | Dependabot | Weekly update pull requests for Python, Actions, and Docker. |
 | Workflow supply chain | Full commit-SHA action pins | Policy tests reject mutable action tags and branches. |
 
-The security workflow runs on pull requests, pushes to `main`, manual dispatch, and a weekly schedule. It publishes JSON audit evidence and a CycloneDX Python SBOM where applicable.
+The security workflow publishes JSON audit evidence and a CycloneDX Python SBOM. The Bandit gate uses a reviewed baseline containing exactly two B608 findings whose SQL fragments are selected only from internal constants; it does not disable B608 globally.
+
+GitHub Dependency Review is not presented as implemented because Dependency Graph is not enabled for this repository. Pull requests are instead gated by auditing the complete resolved head environment. This blocks known vulnerabilities but does not provide a base-versus-head dependency diff.
 
 Local checks:
 
 ```bash
+python -m pip install --upgrade pip "setuptools>=83"
 python -m pip install -e ".[dev,security]"
 python -m pip check
 python -m pip_audit --local --progress-spinner off
-python -m bandit -r src -ll -ii
+python -m bandit -r src -ll -ii -b security/bandit-baseline.json
 ```
 
 - Security policy: [`SECURITY.md`](SECURITY.md)
 - Technical policy: [`docs/security-scanning.md`](docs/security-scanning.md)
 - Spanish guide: [`docs/learning/security-dependencias-es.md`](docs/learning/security-dependencias-es.md)
 
-A green scan means that the configured tools found no blocking issue under their current advisory databases, rules, thresholds, and environment. It does not prove absence of vulnerabilities, secure deployment, PHI readiness, regulatory compliance, or clinical safety.
+A green scan means that the configured tools found no blocking issue under their current advisory databases, rules, thresholds, baseline, and environment. It does not prove absence of vulnerabilities, secure deployment, PHI readiness, regulatory compliance, or clinical safety.
 
 ## Python compatibility
 
@@ -191,6 +193,7 @@ The security milestone introduces no `V009` because it changes workflows, packag
 python --version
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip "setuptools>=83"
 python -m pip install -e ".[dev,security]"
 python -m pip check
 
@@ -212,7 +215,7 @@ python -m ruff check .
 python -m mypy src
 python -m pytest
 python -m pip_audit --local --progress-spinner off
-python -m bandit -r src -ll -ii
+python -m bandit -r src -ll -ii -b security/bandit-baseline.json
 docker build --tag clinical-data-platform:local .
 ```
 
@@ -226,7 +229,7 @@ docker build --tag clinical-data-platform:local .
 - PostgreSQL COPY loading and a correctness-gated benchmark;
 - mandatory statement coverage of at least 90%;
 - PostgreSQL-backed CPython 3.11–3.14 compatibility CI;
-- dependency review, `pip-audit`, Bandit, CodeQL, Trivy, Dependabot, and full-SHA action pinning;
+- `pip-audit`, Bandit with a governed baseline, CodeQL, Trivy, Dependabot, and full-SHA action pinning;
 - Docker, Compose, PowerShell, POSIX, Ruff, strict mypy, pytest, and GitHub Actions.
 
 ## Documentation
