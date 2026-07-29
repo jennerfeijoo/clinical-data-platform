@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 from collections.abc import Sequence
 from datetime import date, datetime
 from pathlib import Path
 
 from clinical_data_platform.cohort import build_hypertension_cohort
+from clinical_data_platform.contract import load_contract, validate_all_contracts
 from clinical_data_platform.database import (
     apply_schema,
     connect_database,
@@ -41,6 +43,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     supported_datasets = dataset_names()
+
+    subparsers.add_parser(
+        "list-contracts",
+        help="List active dataset contract versions selected by the manifest.",
+    )
+
+    show_contract = subparsers.add_parser(
+        "show-contract",
+        help="Display one active executable contract as JSON.",
+    )
+    show_contract.add_argument("dataset", choices=supported_datasets)
+
+    subparsers.add_parser(
+        "validate-contracts",
+        help="Load and validate every active contract definition.",
+    )
 
     validate_dataset = subparsers.add_parser(
         "validate-dataset",
@@ -94,9 +112,74 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _contract_document(dataset: str) -> dict[str, object]:
+    contract = load_contract(dataset)
+    measurement = contract.measurement_rule
+    return {
+        "name": contract.name,
+        "version": contract.version,
+        "resource_path": contract.resource_path,
+        "sha256": contract.sha256,
+        "primary_key": contract.primary_key,
+        "patient_id_column": contract.patient_id_column,
+        "allow_extra_columns": contract.allow_extra_columns,
+        "columns": [
+            {
+                "name": column.name,
+                "type": column.data_type,
+                "required": column.required,
+                "unique": column.unique,
+                "allowed_values": list(column.allowed_values),
+            }
+            for column in contract.columns
+        ],
+        "not_future_fields": list(contract.not_future_fields),
+        "order_rules": [
+            {
+                "earlier_field": rule.earlier_field,
+                "later_field": rule.later_field,
+            }
+            for rule in contract.order_rules
+        ],
+        "measurement_profiles": (
+            [
+                {
+                    "code": profile.code,
+                    "unit": profile.unit,
+                    "minimum": profile.minimum,
+                    "maximum": profile.maximum,
+                }
+                for profile in measurement.profiles.values()
+            ]
+            if measurement is not None
+            else []
+        ),
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "list-contracts":
+        for dataset in dataset_names():
+            contract = load_contract(dataset)
+            print(
+                f"{dataset}: version={contract.version}, "
+                f"sha256={contract.sha256}, path={contract.resource_path}"
+            )
+        return 0
+
+    if args.command == "show-contract":
+        print(json.dumps(_contract_document(args.dataset), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "validate-contracts":
+        contracts = validate_all_contracts()
+        print(f"Validated {len(contracts)} active contracts.")
+        for contract in contracts:
+            print(f"{contract.name} {contract.version} {contract.sha256}")
+        return 0
 
     if args.command == "validate-dataset":
         output_directory = args.output_dir or _default_output_directory(args.dataset)
@@ -109,6 +192,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"{validation_summary.dataset} validation completed: "
             f"run_id={validation_summary.run_id}, "
+            f"contract={validation_summary.contract_version}, "
             f"received={validation_summary.rows_received}, "
             f"valid={validation_summary.rows_valid}, "
             f"invalid={validation_summary.rows_invalid}, "
@@ -128,6 +212,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"{persistence_summary.dataset} persistence completed: "
             f"run_id={persistence_summary.run_id}, "
+            f"contract={persistence_summary.contract_version}, "
             f"already_loaded={persistence_summary.already_loaded}, "
             f"records={persistence_summary.records_upserted}, "
             f"errors={persistence_summary.validation_errors_inserted}"
