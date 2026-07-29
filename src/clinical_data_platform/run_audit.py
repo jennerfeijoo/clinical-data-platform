@@ -11,11 +11,12 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from clinical_data_platform.execution import (
+    EXECUTION_JOURNAL_VERSION,
     ExecutionAuditError,
     ExecutionEvent,
     ExecutionJournalSummary,
     build_execution_event,
-    calculate_execution_event_sha256,
+    validate_execution_event_chain,
 )
 
 
@@ -24,7 +25,7 @@ class RunAuditError(RuntimeError):
 
 
 class RunAlreadyLoadingError(RunAuditError):
-    """Raised when another loader already owns the run's loading state."""
+    """Raised when another loader already owns a run's loading state."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,15 +99,15 @@ class RunAuditValidation:
     audit_gap_reason: str | None
 
 
-def _details(value: object) -> dict[str, object] | None:
+def _json_object(value: object) -> dict[str, object] | None:
     if value is None:
         return None
     if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
-        raise RunAuditError("Run failure_details must be a JSON object.")
+        raise RunAuditError("Audit JSON value must be an object with string keys.")
     return {str(key): item for key, item in value.items()}
 
 
-def _snapshot_from_row(row: tuple[object, ...]) -> PipelineRunSnapshot:
+def _snapshot_from_row(row: tuple[Any, ...]) -> PipelineRunSnapshot:
     return PipelineRunSnapshot(
         run_id=row[0],
         dataset=str(row[1]),
@@ -122,7 +123,7 @@ def _snapshot_from_row(row: tuple[object, ...]) -> PipelineRunSnapshot:
         failure_type=str(row[11]) if row[11] is not None else None,
         failure_message=str(row[12]) if row[12] is not None else None,
         failure_code=str(row[13]) if row[13] is not None else None,
-        failure_details=_details(row[14]),
+        failure_details=_json_object(row[14]),
         local_journal_event_count=int(row[15]),
         local_journal_head_sha256=(
             str(row[16]).strip() if row[16] is not None else None
@@ -220,6 +221,7 @@ def _insert_event(
     )
     if inserted.rowcount == 1:
         return
+
     existing = connection.execute(
         """
         SELECT event_sha256
@@ -282,8 +284,9 @@ def register_validated_run(
             )
             VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, 'validated',
-                %s, 'validation', 0, %s, %s, %s, %s, %s, %s, NULL
+                %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                'validated', %s, 'validation', 0, %s, %s,
+                %s, %s, %s, %s, NULL
             )
             ON CONFLICT (run_id) DO NOTHING
             """,
@@ -316,6 +319,7 @@ def register_validated_run(
                 journal.head_sha256,
             ),
         )
+
         snapshot = _select_run(connection, registration.run_id, for_update=True)
         if snapshot is None:
             raise RunAuditError("Validated run registration was not persisted.")
@@ -333,13 +337,6 @@ def register_validated_run(
             """,
             (registration.run_id,),
         ).fetchone()
-        expected_identity = (
-            registration.dataset,
-            registration.source_sha256,
-            registration.contract_sha256,
-            journal.event_count,
-            journal.head_sha256,
-        )
         actual_identity = (
             str(identity[0]),
             str(identity[1]).strip(),
@@ -347,6 +344,13 @@ def register_validated_run(
             int(identity[3]),
             str(identity[4]).strip(),
         ) if identity is not None else None
+        expected_identity = (
+            registration.dataset,
+            registration.source_sha256,
+            registration.contract_sha256,
+            journal.event_count,
+            journal.head_sha256,
+        )
         if actual_identity != expected_identity:
             raise RunAuditError("Existing run_id refers to different validated content.")
 
@@ -380,12 +384,12 @@ def begin_loading_attempt(
         if snapshot.audit_head_sha256 is None:
             raise RunAuditError("Pipeline run has no audit head for loading transition.")
 
-        attempt = snapshot.attempt_count + 1
+        attempt_number = snapshot.attempt_count + 1
         event = build_execution_event(
             run_id=run_id,
             dataset=snapshot.dataset,
             sequence_number=snapshot.audit_event_count + 1,
-            attempt_number=attempt,
+            attempt_number=attempt_number,
             from_status=snapshot.status,
             to_status="loading",
             stage="persistence",
@@ -413,14 +417,14 @@ def begin_loading_attempt(
             WHERE run_id = %s
             """,
             (
-                attempt,
+                attempt_number,
                 event.occurred_at,
                 event.sequence_number,
                 event.event_sha256,
                 run_id,
             ),
         )
-        return LoadingAttempt(False, attempt)
+        return LoadingAttempt(False, attempt_number)
 
 
 def complete_loading_attempt(
@@ -431,7 +435,7 @@ def complete_loading_attempt(
     records_persisted: int,
     validation_errors_persisted: int,
 ) -> None:
-    """Append completion inside the same transaction as clinical persistence."""
+    """Append completion inside the clinical persistence transaction."""
     snapshot = _select_run(connection, run_id, for_update=True)
     if snapshot is None:
         raise RunAuditError(f"Pipeline run is not registered: {run_id}")
@@ -479,7 +483,7 @@ def fail_loading_attempt(
     stage: str = "persistence",
     details: Mapping[str, object] | None = None,
 ) -> None:
-    """Persist a failed attempt in a new transaction after clinical rollback."""
+    """Persist a failed attempt after the clinical transaction has rolled back."""
     with connection.transaction():
         snapshot = _select_run(connection, run_id, for_update=True)
         if snapshot is None:
@@ -549,6 +553,7 @@ def list_pipeline_run_events(
     run_id: UUID,
 ) -> tuple[ExecutionEvent, ...]:
     """Return one run's ordered execution events."""
+    snapshot = get_pipeline_run(connection, run_id)
     rows = connection.execute(
         """
         SELECT
@@ -571,14 +576,14 @@ def list_pipeline_run_events(
         """,
         (run_id,),
     ).fetchall()
+
     events: list[ExecutionEvent] = []
     for row in rows:
-        event_details = _details(row[12]) or {}
         events.append(
             ExecutionEvent(
-                journal_version="1.0.0",
+                journal_version=EXECUTION_JOURNAL_VERSION,
                 run_id=row[0],
-                dataset=get_pipeline_run(connection, run_id).dataset,
+                dataset=snapshot.dataset,
                 sequence_number=int(row[1]),
                 attempt_number=int(row[2]),
                 from_status=str(row[3]) if row[3] is not None else None,
@@ -592,7 +597,7 @@ def list_pipeline_run_events(
                 error_type=str(row[9]) if row[9] is not None else None,
                 error_message=str(row[10]) if row[10] is not None else None,
                 error_code=str(row[11]) if row[11] is not None else None,
-                details=event_details,
+                details=_json_object(row[12]) or {},
             )
         )
     return tuple(events)
@@ -605,6 +610,7 @@ def validate_pipeline_run_audit(
     """Verify event counts, hashes, transitions, identities, and current state."""
     snapshot = get_pipeline_run(connection, run_id)
     events = list_pipeline_run_events(connection, run_id)
+
     if snapshot.audit_gap_reason is not None and not events:
         return RunAuditValidation(
             run_id=run_id,
@@ -619,53 +625,21 @@ def validate_pipeline_run_audit(
         raise RunAuditError("Run has no execution events and no declared audit gap.")
     if snapshot.audit_head_sha256 != events[-1].event_sha256:
         raise RunAuditError("Run audit head does not match the last event.")
-    if snapshot.local_journal_event_count > len(events):
-        raise RunAuditError("Local journal count exceeds the durable event count.")
-    local_head = events[snapshot.local_journal_event_count - 1].event_sha256
-    if snapshot.local_journal_head_sha256 != local_head:
-        raise RunAuditError("Local journal head does not match imported events.")
 
-    previous: ExecutionEvent | None = None
-    for event in events:
-        if event.run_id != run_id or event.dataset != snapshot.dataset:
-            raise RunAuditError("Execution event identity does not match its run.")
-        if event.event_sha256 != calculate_execution_event_sha256(event):
-            raise RunAuditError(
-                f"Execution event hash mismatch at sequence {event.sequence_number}."
-            )
-        if previous is None:
-            if event.sequence_number != 1 or event.from_status is not None:
-                raise RunAuditError("Execution audit does not begin with sequence one.")
-        else:
-            if event.sequence_number != previous.sequence_number + 1:
-                raise RunAuditError("Execution event sequence is not contiguous.")
-            if event.previous_event_sha256 != previous.event_sha256:
-                raise RunAuditError("Execution event hash chain is broken.")
-            try:
-                build_execution_event(
-                    run_id=event.run_id,
-                    dataset=event.dataset,
-                    sequence_number=event.sequence_number,
-                    attempt_number=event.attempt_number,
-                    from_status=event.from_status,
-                    to_status=event.to_status,
-                    stage=event.stage,
-                    previous_event_sha256=event.previous_event_sha256,
-                    occurred_at=event.occurred_at,
-                    error=(
-                        _AuditFailure(
-                            event.error_message or "Recorded failure",
-                            event.error_type,
-                            event.error_code,
-                        )
-                        if event.to_status == "failed"
-                        else None
-                    ),
-                    details=event.details,
-                )
-            except ExecutionAuditError as exc:
-                raise RunAuditError("Execution event transition is invalid.") from exc
-        previous = event
+    if snapshot.local_journal_event_count == 0:
+        if snapshot.local_journal_head_sha256 is not None:
+            raise RunAuditError("Empty local journal metadata has a non-empty head.")
+    else:
+        if snapshot.local_journal_event_count > len(events):
+            raise RunAuditError("Local journal count exceeds the durable event count.")
+        local_head = events[snapshot.local_journal_event_count - 1].event_sha256
+        if snapshot.local_journal_head_sha256 != local_head:
+            raise RunAuditError("Local journal head does not match imported events.")
+
+    try:
+        validate_execution_event_chain(events)
+    except ExecutionAuditError as exc:
+        raise RunAuditError("Execution event chain is invalid.") from exc
 
     if events[-1].to_status != snapshot.status:
         raise RunAuditError("Current run status does not match its final event.")
@@ -676,12 +650,3 @@ def validate_pipeline_run_audit(
         attempt_count=snapshot.attempt_count,
         audit_gap_reason=snapshot.audit_gap_reason,
     )
-
-
-class _AuditFailure(RuntimeError):
-    """Failure wrapper that preserves stored error metadata during verification."""
-
-    def __init__(self, message: str, error_type: str | None, error_code: str | None) -> None:
-        super().__init__(message)
-        self.recorded_error_type = error_type
-        self.sqlstate = error_code
