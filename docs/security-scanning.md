@@ -6,15 +6,14 @@ Version `0.19.0` adds executable security controls to the synthetic clinical dat
 
 | Risk surface | Control | Failure policy |
 |---|---|---|
-| Python dependencies | `pip-audit` | Any known vulnerability reported by the selected advisory service fails the job. |
-| Python source | Bandit | Findings with at least medium severity and medium confidence fail the job. |
+| Resolved Python environment | `pip-audit` | Any known vulnerability reported by the selected advisory service fails the job. |
+| Python source | Bandit | New findings with at least medium severity and medium confidence fail the job. |
 | Python data flows | CodeQL `security-extended` | Results are uploaded to GitHub code scanning. |
-| Pull-request dependency changes | Dependency Review Action | Newly introduced high or critical vulnerabilities fail the pull request. |
 | Built container image | Trivy | Fixed high or critical OS/library vulnerabilities fail the job. |
 | Dependency freshness | Dependabot | Weekly update pull requests for `pip`, GitHub Actions, and Docker. |
 | Workflow supply chain | Full action SHA pins | Tests reject mutable tags or branches in `uses:` lines. |
 
-## Python dependency evidence
+## Python dependency evidence and pull-request gate
 
 The security workflow installs:
 
@@ -22,13 +21,17 @@ The security workflow installs:
 .[dev,security]
 ```
 
-and then executes:
+Before resolving the project it upgrades the packaging toolchain to `setuptools>=83`, which is also the build-system floor declared in `pyproject.toml`.
+
+It then executes:
 
 ```bash
 python -m pip check
 python -m pip_audit --local --format json
 python -m pip_audit --local --format cyclonedx-json
 ```
+
+The same job runs for every pull request. A newly added vulnerable package therefore makes the resolved head environment fail even though the repository does not currently provide a base-versus-head dependency diff.
 
 The job uploads:
 
@@ -39,30 +42,46 @@ python-sbom.cdx.json
 
 The CycloneDX document is an inventory of the resolved CI environment. It is not a lockfile and does not guarantee that a later installation resolves identical transitive versions.
 
+### Why GitHub Dependency Review is not used
+
+The first implementation attempted to run GitHub's Dependency Review Action. GitHub rejected the job because Dependency Graph is not enabled for this repository. The final workflow does not hide that error with `continue-on-error`; it removes the unsupported action and retains the complete resolved-environment audit as the blocking pull-request dependency gate.
+
+This has an explicit limitation: `pip-audit` evaluates the proposed environment but does not label a vulnerability as newly introduced relative to the base branch.
+
 ## Static analysis
 
 Bandit runs against `src/` with:
 
 ```bash
-python -m bandit -r src -ll -ii
+python -m bandit -r src -ll -ii \
+  -b security/bandit-baseline.json
 ```
 
-`-ll` requires at least medium severity. `-ii` requires at least medium confidence. This reduces low-confidence noise while preserving a failing gate for more credible findings.
+`-ll` requires at least medium severity. `-ii` requires at least medium confidence. The baseline contains exactly two reviewed B608 findings:
+
+1. `_select_run()` appends either an empty string or the constant `FOR UPDATE`, selected by a boolean; the `run_id` remains parameterized.
+2. the two-cohort preflight selects table and identifier names exclusively from the fixed `DATASET_ID_COLUMNS` six-entity registry; identifier values remain parameterized.
+
+The baseline is not a global B608 skip. It records those exact findings, and a policy test verifies the file names, test IDs, severity, and count. New findings or changed locations remain blocking. Bandit officially supports JSON baselines for reviewed non-issues.
 
 CodeQL runs independently with the extended Python security query suite. Keeping it separate from Bandit matters because the two tools use different models and can detect different classes of weakness.
 
-## Pull-request dependency review
-
-The dependency review job runs only for pull requests and rejects newly introduced vulnerabilities at severity `high` or `critical`. It evaluates dependency changes rather than rescanning only the current environment.
-
 ## Container scanning
 
-The workflow builds the same repository Dockerfile and scans the resulting image with Trivy:
+The workflow builds the repository Dockerfile and scans the resulting image with Trivy:
 
 ```text
 vulnerability types: OS packages and language libraries
 severity: HIGH, CRITICAL
 unfixed findings: reported but ignored by the failing gate
+```
+
+The initial scan detected fixed vulnerabilities in the packaging toolchain. The Dockerfile now upgrades:
+
+```text
+setuptools >=83
+wheel >=0.46.2
+jaraco.context >=6.1.0
 ```
 
 Ignoring unfixed findings avoids blocking every build on a vulnerability for which no remediation exists, but the finding remains visible in the scanner output. This is a policy choice, not a statement that unfixed vulnerabilities are harmless.
@@ -91,17 +110,18 @@ Scheduled execution matters because an unchanged dependency can become vulnerabl
 ## Local commands
 
 ```bash
+python -m pip install --upgrade pip "setuptools>=83"
 python -m pip install -e ".[dev,security]"
 python -m pip check
 python -m pip_audit --local --progress-spinner off
-python -m bandit -r src -ll -ii
+python -m bandit -r src -ll -ii -b security/bandit-baseline.json
 ```
 
-CodeQL, dependency review, and the container scan remain authoritative GitHub Actions results because they depend on GitHub services or the CI container environment.
+CodeQL and the container scan remain authoritative GitHub Actions results because they depend on GitHub services or the CI container environment.
 
 ## Interpretation limits
 
-A green security workflow means that the configured scanners did not find a blocking issue under their current databases, rules, thresholds, and execution environment. It does not prove:
+A green security workflow means that the configured scanners did not find a blocking issue under their current databases, rules, thresholds, baseline, and execution environment. It does not prove:
 
 - absence of unknown or logic vulnerabilities;
 - safety of every transitive native library;
