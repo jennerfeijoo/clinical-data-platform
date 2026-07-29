@@ -8,7 +8,7 @@ This benchmark measures the loading kernel introduced by the PostgreSQL COPY mil
 
 It does not benchmark the complete clinical data pipeline.
 
-## What is compared
+## Compared methods
 
 ### COPY method
 
@@ -31,7 +31,7 @@ typed row iterator
 → COMMIT
 ```
 
-`executemany` is the previous application implementation and therefore a useful internal reference. It is not a claim that every possible PostgreSQL batching strategy behaves identically.
+`executemany` is the former application implementation. It is a useful internal reference, not a claim about every possible PostgreSQL batch-loading strategy.
 
 ## Governed target state
 
@@ -39,15 +39,17 @@ Both methods write to the actual migrated clinical model. The benchmark leaves a
 
 - foreign keys;
 - check constraints;
+- indexes;
 - terminology-resolution triggers;
 - normalized concept assignment;
 - record SHA-256 generation;
 - patient SCD Type 2 history;
 - immutable-event conflict guards;
 - transaction commits;
-- lineage foreign keys through `source_run_id`.
+- lineage foreign keys through `source_run_id`;
+- PostgreSQL durability settings such as `fsync` and `synchronous_commit`.
 
-The benchmark does not disable triggers, constraints, WAL durability settings, or synchronous commits.
+The benchmark does not disable triggers, change `session_replication_role`, or write directly to history tables.
 
 ## Measurement boundary
 
@@ -57,7 +59,7 @@ Measured time includes:
 contract-compatible string-to-type conversion
 Python/psycopg transfer
 COPY staging or executemany upsert
-set merge for COPY
+set-based merge for COPY
 clinical triggers
 constraints and indexes
 transaction commit
@@ -72,11 +74,11 @@ immutable raw capture
 contract validation
 quality-report creation
 full durable execution-audit lifecycle
-post-load row-count and fingerprint verification
+post-load verification queries
 artifact serialization
 ```
 
-The benchmark is therefore a governed persistence-kernel benchmark, not an end-to-end pipeline benchmark.
+The result therefore describes a governed persistence kernel, not end-to-end pipeline latency.
 
 ## Deterministic workload
 
@@ -98,7 +100,7 @@ For each patient it creates:
 | procedures | 2 |
 | Total | 15 |
 
-The documented profile uses:
+The reference profile fixes:
 
 | Control | Value |
 |---|---|
@@ -107,17 +109,19 @@ The documented profile uses:
 | Patient sizes | 250, 1,000, 2,500 |
 | Clinical row sizes | 3,750, 15,000, 37,500 |
 | Warm-ups | 1 per method and size |
-| Measured repetitions | 5 per method and size |
-| Method order | Alternating AB/BA |
+| Measured repetitions | 6 per method and size |
+| Method order | alternating AB/BA |
+| COPY starts first | 3 repetitions |
+| `executemany` starts first | 3 repetitions |
 | Writer concurrency | 1 |
 
-Every generated workload has a SHA-256 fingerprint derived from its configuration and canonical record content.
+Every workload has a SHA-256 fingerprint derived from its configuration and canonical record content.
 
-## Why method order alternates
+## Balanced ordering
 
-Always running COPY first or always running it second would confound method with order. Cache state, background activity, database page residency, CPU frequency, and runner contention can change during execution.
+A fixed order would confound method with execution position. Cache residency, runner contention, CPU frequency, background activity, and page state can change over time.
 
-Measured repetitions therefore use:
+The six measured repetitions use:
 
 ```text
 repetition 1: COPY → executemany
@@ -125,24 +129,55 @@ repetition 2: executemany → COPY
 repetition 3: COPY → executemany
 repetition 4: executemany → COPY
 repetition 5: COPY → executemany
+repetition 6: executemany → COPY
 ```
 
-This does not eliminate all environmental variation, but it prevents a fixed ordering bias.
+Each method therefore appears first three times and second three times.
+
+## Database safety gate
+
+The benchmark resets platform state between trials. It must never be pointed casually at a working database.
+
+The CLI requires:
+
+```text
+--allow-destructive-reset
+```
+
+After applying migrations, it enumerates every base table in:
+
+```text
+audit
+clinical
+analytics
+```
+
+It counts rows in each table and refuses to start if any table is populated. The terminology schema is excluded because migrations intentionally seed its local reference subset and the benchmark does not truncate it.
+
+This creates two independent safeguards:
+
+```text
+explicit destructive confirmation
++
+verified empty governed schemas
+```
+
+The benchmark should still be run only against a dedicated disposable database.
 
 ## Correctness gate
 
-A faster method is irrelevant if it produces different data. After every trial the benchmark verifies:
+A method is not accepted as faster unless it produces equivalent governed content. After every trial the benchmark verifies:
 
 - exact row counts for all six entities;
 - patient-history row count;
-- exactly one current patient-history row per patient;
+- exactly one current history row per patient;
 - terminology binding count;
 - ordered aggregate digest of `record_sha256` values per entity;
 - one combined database-content fingerprint.
 
-For each population size, all COPY and `executemany` trials must produce the same database fingerprint. The benchmark fails before publishing results when fingerprints differ.
+For each population size, all twelve measured trials must produce one identical database fingerprint.
 
-The reference execution produced one stable fingerprint per size across all ten measured trials:
+Reference fingerprints:
 
 | Patients | Database-content fingerprint |
 |---:|---|
@@ -150,18 +185,18 @@ The reference execution produced one stable fingerprint per size across all ten 
 | 1,000 | `0de3fb68be7f9d01ddc6cf6d7ce929ecf7c15c1f1b8a5bd0f4d780b633cf8b2a` |
 | 2,500 | `c224fd2dac09e27af51186c2986d3efb05a305fb0d68a8356b8af6061821a8e7` |
 
-These are fingerprints of governed database content, not hashes of the source workload files.
+These identify governed database content, not source files or real patients.
 
 ## Metrics
 
-For each trial:
+For one trial:
 
 ```text
 elapsed_ms = measured wall-clock nanoseconds / 1,000,000
 rows_per_second = total clinical rows / elapsed seconds
 ```
 
-For each method and workload size, the benchmark reports:
+For each method and workload size, the report stores:
 
 - minimum elapsed time;
 - maximum elapsed time;
@@ -171,7 +206,7 @@ For each method and workload size, the benchmark reports:
 - median throughput;
 - median elapsed time by dataset.
 
-The headline comparison uses medians:
+The headline comparison uses:
 
 ```text
 COPY speedup = executemany median / COPY median
@@ -180,99 +215,95 @@ elapsed reduction (%) =
     (1 - COPY median / executemany median) × 100
 ```
 
-Median is used as the headline statistic because it is less sensitive than the mean to an isolated slow trial on shared infrastructure.
+The median is less sensitive than the mean to one unusually slow hosted-runner trial.
 
-## Reference environment
+## Balanced reference environment
 
-The committed reference execution was GitHub Actions workflow run `30466706538`.
+The project reference is GitHub Actions workflow run `30470147850`.
 
 | Property | Value |
 |---|---|
-| Workflow head SHA | `db4975cf09a5eec6b8ec7e18a292fc13234821ab` |
-| Recorded GitHub merge-ref SHA | `7efadba8f634132d34444fc501fa1602c298a1d6` |
-| Package version during measurement | `0.13.0` |
+| Workflow head SHA | `e265dc00413688752ce652ef26a3b324bc3564c2` |
+| Recorded GitHub merge-ref SHA | `6a16037674386d7c33ca811ecff5a9dd02f19b14` |
+| Package | `0.14.0` |
 | Python | CPython 3.11.15 |
 | PostgreSQL | 16.14 |
-| Runner OS | Ubuntu 24.04 generation, Linux 6.17 Azure kernel |
-| CPU model | AMD EPYC 9V74 80-Core Processor |
+| OS | Linux 6.17 Azure kernel on Ubuntu runner image |
+| CPU model | AMD EPYC 7763 64-Core Processor |
 | Logical CPUs visible | 4 |
-| Physical memory visible | 16,766,423,040 bytes |
+| Physical memory visible | 16,766,418,944 bytes |
 | `fsync` | on |
 | `full_page_writes` | on |
 | `synchronous_commit` | on |
 | `wal_level` | replica |
 | `shared_buffers` | 128 MB |
 
-The CPU model describes the host family. The job had four logical CPUs available; it did not have exclusive access to eighty cores.
+The CPU model names the host processor family. The job had four logical CPUs visible, not sixty-four exclusive cores.
 
-## Reference results
+## Balanced reference results
 
 | Patients | Clinical rows | COPY median | `executemany` median | COPY throughput | Reference throughput | Speedup | Time reduction |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 250 | 3,750 | 671.737 ms | 928.806 ms | 5,582.5 rows/s | 4,037.4 rows/s | 1.383× | 27.68% |
-| 1,000 | 15,000 | 2,615.950 ms | 3,693.506 ms | 5,734.1 rows/s | 4,061.2 rows/s | 1.412× | 29.17% |
-| 2,500 | 37,500 | 6,465.960 ms | 9,176.855 ms | 5,799.6 rows/s | 4,086.4 rows/s | 1.419× | 29.54% |
+| 250 | 3,750 | 825.694 ms | 1,083.028 ms | 4,541.8 rows/s | 3,462.6 rows/s | 1.312× | 23.76% |
+| 1,000 | 15,000 | 3,183.671 ms | 4,341.867 ms | 4,711.5 rows/s | 3,454.8 rows/s | 1.364× | 26.68% |
+| 2,500 | 37,500 | 7,936.444 ms | 10,955.541 ms | 4,725.0 rows/s | 3,422.9 rows/s | 1.380× | 27.56% |
 
-Within this environment and workload, COPY was consistently faster. The measured advantage increased modestly with workload size.
+Within this environment and workload, COPY was faster at all three sizes. The relative advantage increased with workload size.
 
 ## Per-dataset observations
 
-At 2,500 patients, the median COPY times were:
+At 2,500 patients, COPY median component times were:
 
 | Dataset | Rows | Median time |
 |---|---:|---:|
-| patients | 2,500 | 321.863 ms |
-| encounters | 5,000 | 450.492 ms |
-| diagnoses | 5,000 | 925.393 ms |
-| observations | 15,000 | 2,834.134 ms |
-| medications | 5,000 | 980.865 ms |
-| procedures | 5,000 | 954.076 ms |
+| patients | 2,500 | 412.744 ms |
+| encounters | 5,000 | 565.922 ms |
+| diagnoses | 5,000 | 1,134.315 ms |
+| observations | 15,000 | 3,467.419 ms |
+| medications | 5,000 | 1,196.348 ms |
+| procedures | 5,000 | 1,150.883 ms |
 
-Observations dominate total time because they contain three times as many rows as each two-per-patient event table. Medication, diagnosis, and procedure loads also execute terminology and immutability logic.
+Observations dominate because they contain three times as many rows as each two-per-patient event table. Coded entities also execute terminology and immutability logic.
 
-These component times overlap with no other dataset because datasets are loaded sequentially. Their sum is close to, but need not exactly equal, total elapsed time due to timer placement and Python loop overhead.
+## Prior evidence
 
-## Replication evidence
-
-An earlier independent workflow execution, run `30466367453`, used the same workload and environment profile and observed:
-
-| Patients | COPY speedup | Time reduction |
-|---:|---:|---:|
-| 250 | 1.380× | 27.52% |
-| 1,000 | 1.407× | 28.94% |
-| 2,500 | 1.423× | 29.73% |
-
-The close results support repeatability on two adjacent hosted-runner executions. Two runs are still insufficient to characterize long-term runner variance.
-
-## Evidence files
-
-Permanent reference evidence is stored under:
+An earlier five-repetition run produced stronger-looking speedups, approximately 1.38–1.42×. It is retained under:
 
 ```text
 benchmarks/loading/github-actions-run-30466706538/
+```
+
+That run is no longer the project reference because five alternating repetitions gave COPY three first positions and `executemany` only two. It remains useful provenance but should not replace the balanced result.
+
+## Evidence files
+
+Balanced evidence is stored under:
+
+```text
+benchmarks/loading/github-actions-run-30470147850/
 ├── benchmark-summary.md
 ├── benchmark-trials.csv
 └── reference-run.json
 ```
 
-`reference-run.json` contains:
+`reference-run.json` records:
 
 - workflow and artifact provenance;
 - artifact digest;
-- hashes of the original generated files;
-- benchmark configuration;
+- hashes of original generated evidence files;
+- configuration;
 - environment metadata;
 - workload fingerprints;
 - aggregate results;
 - comparisons;
-- interpretation limits.
+- limitations.
 
-The original workflow artifact was:
+Original artifact:
 
 ```text
-artifact id:      8729938736
+artifact id:      8731378490
 artifact name:    governed-loading-benchmark
-artifact digest:  sha256:928281815f5c26481a5f7a762826e481cc4047f216cfecdd9f5560239c04e163
+artifact digest:  sha256:89b3a915252096bbe9b1ba3ccc02b88d73c34b8cb7a8dafff5faeb1a48bc00fa
 ```
 
 GitHub artifact retention is finite. The committed evidence remains available after artifact expiration.
@@ -283,10 +314,8 @@ Requirements:
 
 - Python 3.11 or later;
 - PostgreSQL accessible through `DATABASE_URL`;
-- migrated platform schema;
-- an isolated database whose benchmark data may be deleted.
-
-The benchmark truncates platform run state with cascading deletion before each trial. It must not be pointed at a database containing data that must be retained.
+- a dedicated empty database;
+- permission to migrate and truncate platform tables.
 
 PowerShell:
 
@@ -297,8 +326,9 @@ docker compose up -d postgres
 $env:DATABASE_URL = "postgresql://clinical_user:clinical_password@localhost:5432/clinical_data"
 
 clinical-data-benchmark `
+    --allow-destructive-reset `
     --patients 250 1000 2500 `
-    --repetitions 5 `
+    --repetitions 6 `
     --warmups 1 `
     --seed 20260729 `
     --output-dir data/benchmarks/loading
@@ -312,12 +342,15 @@ docker compose up -d postgres
 export DATABASE_URL='postgresql://clinical_user:clinical_password@localhost:5432/clinical_data'
 
 clinical-data-benchmark \
+  --allow-destructive-reset \
   --patients 250 1000 2500 \
-  --repetitions 5 \
+  --repetitions 6 \
   --warmups 1 \
   --seed 20260729 \
   --output-dir data/benchmarks/loading
 ```
+
+Odd repetition counts are rejected by the CLI because they cannot balance the starting position of two methods.
 
 ## Automated workflow
 
@@ -327,59 +360,54 @@ The dedicated workflow is:
 .github/workflows/benchmark.yml
 ```
 
-It runs when:
+It runs when benchmark implementation paths change and can also be dispatched manually. It writes the Markdown summary to the GitHub job summary and uploads all generated evidence.
 
-- manually dispatched;
-- benchmark implementation paths change in a pull request;
-- benchmark implementation paths change on `main`.
+Normal CI runs a small two-repetition integration benchmark. The larger profile remains separate because performance evidence is slower and more environmentally variable than ordinary correctness tests.
 
-The workflow writes the Markdown summary to the GitHub job summary and uploads all generated evidence as the `governed-loading-benchmark` artifact.
+## Responsible interpretation
 
-Normal CI does not run the full 37,500-row protocol on every unrelated change. It runs a small PostgreSQL integration benchmark to verify method equivalence and artifact generation.
+The measured values support:
 
-## Interpretation rules
+> On the recorded GitHub Actions environment, for deterministic initial loading of 3,750–37,500 rows into the governed six-entity schema, COPY-to-temporary-staging plus set merge reduced median loading time by 23.76–27.56% relative to the former psycopg `executemany` path.
 
-The measured values support this statement:
-
-> On the recorded GitHub Actions environment, for deterministic initial loading of 3,750–37,500 rows into the governed six-entity schema, COPY-to-temporary-staging plus set merge reduced median loading time by 27.68–29.54% relative to the previous psycopg `executemany` reference path.
-
-They do not support these statements:
+They do not support:
 
 ```text
-COPY is always 30% faster.
-The full pipeline is 30% faster.
-The application can load a hospital database at 5,800 rows/s.
-Memory use was reduced by a known percentage.
-The result applies unchanged to concurrent writers or updates.
-The result proves production capacity.
+COPY is always 25% faster.
+The complete pipeline is 25% faster.
+The platform can sustain hospital production traffic.
+The rate remains constant at millions of rows.
+Peak memory was reduced by a known amount.
+The result applies unchanged to remote or concurrent PostgreSQL.
 ```
 
-## Known limitations
+## Limitations
 
-1. GitHub-hosted runners are shared and can vary between executions.
-2. Five repetitions provide descriptive evidence, not inferential confidence intervals.
+1. GitHub-hosted runners are shared and vary between executions.
+2. Six repetitions provide descriptive evidence, not robust inferential confidence intervals.
 3. Only initial inserts are measured; update-heavy conflict paths are not.
 4. Only one writer is active.
-5. Network distance is minimal because PostgreSQL runs as a local service container.
-6. Workload values are synthetic and deliberately regular.
-7. The largest measured workload contains 37,500 rows, not millions.
-8. The full validation and audit lifecycle is outside the timed region.
-9. Peak memory is not reported because Python-only allocation tracking would omit native driver and PostgreSQL memory.
-10. Database storage growth, WAL bytes, CPU utilization, and I/O counters are not yet measured.
+5. PostgreSQL runs as a local service container.
+6. The workload is synthetic and deliberately regular.
+7. The largest profile contains 37,500 rows, not millions.
+8. Validation and the full execution-audit lifecycle are outside the timed region.
+9. Peak memory is not reported because Python-only tracking omits native-driver and PostgreSQL memory.
+10. WAL bytes, CPU utilization, storage growth, and I/O counters are not measured.
 
-## Future benchmark extensions
+## Future extensions
 
-Possible future experiments include:
+Future profiles may cover:
 
 - end-to-end validation plus persistence;
-- Synthea populations larger than 2,500 patients;
+- larger Synthea populations;
 - update and exact-duplicate workloads;
-- concurrent loaders;
+- conflicting immutable events;
+- concurrent writers;
 - remote PostgreSQL latency;
 - WAL-volume comparison;
-- container CPU and memory limits;
-- cold-start versus warm-cache profiles;
-- PostgreSQL versions other than 16;
-- alternative batch sizes and prepared-statement strategies.
+- explicit CPU and memory limits;
+- cold-cache and warm-cache profiles;
+- other PostgreSQL versions;
+- alternative batching and prepared-statement strategies.
 
-These extensions should remain separate profiles rather than being silently mixed into the current reference benchmark.
+Those experiments should remain separate profiles rather than being silently mixed into this reference.
