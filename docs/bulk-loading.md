@@ -2,26 +2,23 @@
 
 ## Scope
 
-The persistence layer uses PostgreSQL `COPY FROM STDIN` for validated clinical rows and validation errors. The design improves the data-transfer path without bypassing the platform's clinical controls.
+The persistence layer uses PostgreSQL `COPY FROM STDIN` for validated clinical rows and validation errors. The design improves data transfer without bypassing clinical controls.
 
-This milestone establishes a bulk-loading implementation. It does not claim a measured speedup. Reproducible performance measurements belong to the separate benchmark milestone.
+The separate governed loading benchmark now measures this implementation against the previous psycopg `executemany` path. Reference evidence is documented in [`loading-benchmark.md`](loading-benchmark.md).
 
 ## Previous persistence path
 
-The earlier implementation converted every validated CSV row into a Python tuple, retained the complete batch in memory, and sent the tuples with `cursor.executemany()`.
+The earlier implementation converted every validated CSV row into a Python tuple, retained the complete batch in memory, and sent tuples with `cursor.executemany()`.
 
 ```text
 validated CSV
-    → list[dict]
-    → list[tuple]
-    → repeated parameterized INSERT
-    → clinical table
+→ list[dict]
+→ list[tuple]
+→ repeated parameterized INSERT
+→ clinical table
 ```
 
-This was correct for small fixtures, but it created two scaling problems:
-
-1. the persistence path retained all validated records and all converted tuples in memory;
-2. PostgreSQL received a sequence of row-oriented statements instead of a bulk stream.
+This was correct for small fixtures, but it retained both input records and converted tuples and used a row-oriented transfer path.
 
 ## Current persistence path
 
@@ -60,26 +57,28 @@ FROM <clinical_target>
 WITH NO DATA;
 ```
 
-It inherits the selected PostgreSQL data types but does not copy target constraints, indexes, defaults, or triggers. This makes staging inexpensive while preserving typed input.
+It inherits selected PostgreSQL data types but does not copy target constraints, indexes, defaults, or triggers. This keeps staging temporary and lightweight while retaining typed input.
 
 ## Why COPY does not write directly to the clinical target
 
-A direct command such as:
+A direct operation such as:
 
 ```sql
 COPY clinical.patients (...) FROM STDIN;
 ```
 
-would be fast for append-only input, but it cannot express the platform's required `ON CONFLICT` behavior. The current model needs two different policies:
+cannot express the required `ON CONFLICT` policies.
+
+The model needs:
 
 - patients: current snapshot upsert plus SCD Type 2 history;
-- encounters, diagnoses, observations, medications, and procedures: exact duplicate tolerance with conflicting identifier reuse rejected by immutable-event triggers.
+- events: exact duplicate tolerance with conflicting identifier reuse rejected.
 
-The staging table separates transfer from reconciliation:
+Staging separates transfer from reconciliation:
 
 ```text
 COPY
-→ fast transfer into staging
+→ bulk transfer into staging
 
 INSERT ... SELECT ... ON CONFLICT
 → governed merge into the clinical model
@@ -87,7 +86,7 @@ INSERT ... SELECT ... ON CONFLICT
 
 ## Why target triggers remain enabled
 
-The merge statement writes to the real clinical table. Therefore all target controls continue to execute:
+The merge writes to the real clinical table. Therefore target controls execute normally:
 
 ```text
 patients
@@ -104,11 +103,11 @@ all entities
 → source-run lineage
 ```
 
-The implementation does not disable triggers, set `session_replication_role`, or copy directly into internal history tables.
+The implementation does not disable triggers, change `session_replication_role`, or copy directly into history tables.
 
 ## Declarative COPY plans
 
-Each registered dataset has a `CopyMergePlan` containing:
+Each dataset has a `CopyMergePlan` containing:
 
 ```text
 schema
@@ -119,9 +118,9 @@ update columns
 whether loaded_at is refreshed
 ```
 
-The registry remains the only location that defines dataset-specific persistence shape. The generic COPY engine composes identifiers safely with `psycopg.sql.Identifier`.
+The registry defines dataset-specific persistence shape. The generic engine composes identifiers with `psycopg.sql.Identifier`.
 
-The six targets are:
+Targets:
 
 ```text
 clinical.patients
@@ -134,44 +133,42 @@ clinical.procedures
 
 ## Streaming and memory boundary
 
-Persistence no longer calls `read_csv_records()` for validated outputs. It uses two passes with bounded record memory:
+Persistence no longer calls `read_csv_records()` for validated outputs. It uses two bounded-record-memory passes:
 
-1. `inspect_csv_records()` validates the header, validates row structure, and counts rows;
-2. `iter_csv_records()` reopens the CSV and yields one record at a time to the typed row builder and COPY writer.
+1. `inspect_csv_records()` validates headers and row structure and counts rows.
+2. `iter_csv_records()` reopens the CSV and yields one record at a time to the row builder and COPY writer.
 
-The platform still materializes source records during contract validation. The bounded-memory improvement applies specifically to the database persistence phase.
+Contract validation still materializes the complete source dataset. The bounded-memory improvement applies to persistence, not the complete pipeline.
 
-## Validation-output preflight
+## Preflight
 
-Before any loading attempt begins, persistence verifies:
+Before loading begins, persistence verifies:
 
 ```text
 quality report structure
 exact valid-output header
 exact invalid-output header
 exact validation-error header
-valid row count
-invalid row count
-validation-error count
+valid, invalid, and error counts
 contract path, version, and SHA-256
 raw receipt and object lineage
 execution journal identity and hash chain
 UUID and date fields
 ```
 
-The copied row counts are checked again inside the transaction. A file changed between preflight and COPY causes the transaction to fail.
+Copied counts are checked again inside the transaction. A file changed between preflight and COPY causes failure.
 
 ## Clinical transaction
 
-For a non-idempotent loading attempt:
+For a non-idempotent attempt:
 
 ```text
 Transaction B
     create temporary staging table
     COPY clinical rows to staging
-    set-based merge into governed target
-    COPY validation errors into audit.validation_errors
-    append completed execution event
+    merge into governed target
+    COPY validation errors
+    append completed event
     update current run projection
     COMMIT
 ```
@@ -186,17 +183,17 @@ completed event
 → ROLLBACK together
 ```
 
-The already-committed loading state is then followed by a durable failed event in a separate transaction, preserving the existing audit topology.
+A durable failed event is then recorded in a separate transaction.
 
 ## Validation-error COPY
 
-Validation errors do not need conflict reconciliation because one validated run is loaded only once after successful completion. They are copied directly into:
+Validation errors are copied directly into:
 
 ```text
 audit.validation_errors
 ```
 
-The copied columns are:
+Columns:
 
 ```text
 run_id
@@ -209,17 +206,17 @@ message
 rejected_value
 ```
 
-They remain in the same clinical transaction as the target merge and completion event.
+They remain in the same transaction as the clinical merge and completion event.
 
 ## Idempotency and retries
 
 ### Completed run
 
-A repeated request for a run already marked `completed` returns without creating staging tables or writing rows.
+A repeated request for a completed run returns before staging or row writes.
 
 ### Failed run
 
-The same validated run can retry:
+A validated run may retry:
 
 ```text
 failed
@@ -227,19 +224,19 @@ failed
 → completed or failed
 ```
 
-Temporary staging table names include a random suffix, preventing collisions between attempts or concurrent sessions.
+Staging names include random suffixes, avoiding collisions between attempts or sessions.
 
-### Duplicate clinical event
+### Exact duplicate event
 
-An event with the same identifier and identical business content is accepted by the target upsert path. Existing immutable-event triggers return the stored record rather than replacing its original lineage.
+An event with the same identifier and business content is accepted. Immutable-event triggers preserve the existing row and original lineage.
 
-### Conflicting clinical event
+### Conflicting event
 
-An event reusing an identifier with different business content causes the target trigger to raise an error. The full clinical transaction rolls back and the loading failure remains auditable.
+Reusing an identifier with different business content raises an error. The clinical transaction rolls back and the failed attempt remains auditable.
 
 ## Structured logging
 
-New operational event families include:
+Operational event families:
 
 ```text
 persistence.copy.started
@@ -251,7 +248,7 @@ persistence.validation_error_copy.completed
 persistence.validation_error_copy.failed
 ```
 
-Completion fields include aggregate technical metadata:
+Aggregate fields include:
 
 ```text
 loading_method = postgresql_copy
@@ -263,35 +260,31 @@ duration_ms
 attempt_number
 ```
 
-No clinical rows or identifiers are intentionally logged.
+Clinical rows and identifiers are not intentionally logged.
 
 ## Rows copied versus rows merged
 
-`rows_copied` is the number of records transmitted into the temporary table.
+`rows_copied` is the number transmitted into staging.
 
-`rows_merged` is the PostgreSQL row count reported by the set-based target statement. It includes inserted rows and rows handled by the conflict action.
-
-These values answer different questions:
+`rows_merged` is the PostgreSQL row count from target reconciliation, including inserted rows and rows handled by conflict actions.
 
 ```text
 rows_copied
-→ Did the complete validated batch reach PostgreSQL staging?
+→ did the complete validated batch reach staging?
 
 rows_merged
-→ How many target rows were processed by reconciliation?
+→ how many target rows were processed by reconciliation?
 ```
 
-The authoritative run completion count continues to use the validated records transferred for that run.
-
-## Database migration boundary
+## Migration boundary
 
 No V009 migration is required because:
 
-- staging tables are session-local and temporary;
+- staging tables are temporary;
 - no permanent table, function, trigger, index, view, or constraint is added;
-- the existing V001–V008 schema already contains the required clinical and audit controls.
+- V001–V008 already contain the required controls.
 
-After loading, the migration state remains:
+Expected state:
 
 ```text
 detected=8
@@ -300,35 +293,58 @@ latest=8
 pending=[]
 ```
 
+## Measured reference
+
+The documented benchmark uses actual governed targets and compares COPY with the former `executemany` path.
+
+Reference GitHub Actions results:
+
+| Clinical rows | COPY median | `executemany` median | Speedup | Time reduction |
+|---:|---:|---:|---:|---:|
+| 3,750 | 671.737 ms | 928.806 ms | 1.383× | 27.68% |
+| 15,000 | 2,615.950 ms | 3,693.506 ms | 1.412× | 29.17% |
+| 37,500 | 6,465.960 ms | 9,176.855 ms | 1.419× | 29.54% |
+
+These values apply to the recorded environment and initial single-writer workload. They are not universal PostgreSQL constants or end-to-end pipeline results.
+
+See:
+
+- [`loading-benchmark.md`](loading-benchmark.md);
+- [`../benchmarks/loading/github-actions-run-30466706538/benchmark-summary.md`](../benchmarks/loading/github-actions-run-30466706538/benchmark-summary.md);
+- [`learning/benchmark-carga-postgresql-es.md`](learning/benchmark-carga-postgresql-es.md).
+
 ## Testing
 
-The test suite covers:
+The suite covers:
 
 ```text
 COPY plan validation
 streaming CSV inspection
-COPY into a temporary target
-set-based insert and update reconciliation
+temporary staging
+set-based reconciliation
 direct validation-error COPY
-all six clinical entities
+all six entities
 patient SCD Type 2 history
-immutable event conflicts
+immutable conflicts
 terminology assignment
 foreign-key rollback
 loading retries
 completed-run idempotency
 durable failure audit
+benchmark method equivalence
+benchmark artifacts
 Docker and package smoke tests
 ```
 
 ## Limitations
 
-- COPY currently uses psycopg row adaptation with `write_row()`, not PostgreSQL binary COPY.
+- COPY uses psycopg row adaptation with `write_row()`, not binary COPY.
 - Contract validation still loads a complete input dataset into Python memory.
-- The temporary staging table is not analyzed because each table exists only for one short transaction.
+- Temporary staging is not analyzed because each table exists for one short transaction.
 - Parallel multi-dataset orchestration is not implemented.
-- Performance, peak memory, rows per second, and scaling behavior have not yet been benchmarked.
-- This repository remains synthetic-data engineering software, not a PHI-ready or production clinical platform.
+- The benchmark covers initial single-writer loads up to 37,500 rows.
+- Updates, concurrency, remote PostgreSQL, WAL volume, and peak memory are not measured.
+- The repository remains synthetic-data engineering software, not a PHI-ready or production clinical platform.
 
 ## Relevant files
 
@@ -337,5 +353,9 @@ src/clinical_data_platform/bulk.py
 src/clinical_data_platform/ingestion.py
 src/clinical_data_platform/registry.py
 src/clinical_data_platform/database.py
+src/clinical_data_platform/benchmark.py
+src/clinical_data_platform/benchmark_cli.py
 tests/test_bulk_loading.py
+tests/test_benchmark.py
+.github/workflows/benchmark.yml
 ```
