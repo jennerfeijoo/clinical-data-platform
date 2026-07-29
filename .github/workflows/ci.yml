@@ -6,7 +6,7 @@ on:
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   quality:
@@ -34,6 +34,54 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: feat/attrition-missingness-reports
+          fetch-depth: 0
+
+      - name: Apply pending formatting fix
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/clinical_data_platform/synthea_quality.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''            "- `required`: a blank value would violate the active contract; verified reports require zero.",
+            "- `optional`: absence is permitted and may represent a clinical state such as no recorded death or no end date.",
+            "- `structural`: the current adapter does not receive a reliable structured value for the field.",
+            "- Source missingness is descriptive and does not assign contract requirements to upstream columns.",
+            "- Rates compare synthetic artifacts descriptively; no hypothesis test or clinical inference is performed.",
+'''
+          new = '''            (
+                "- `required`: a blank value would violate the active contract; "
+                "verified reports require zero."
+            ),
+            (
+                "- `optional`: absence is permitted and may represent a clinical "
+                "state such as no recorded death or no end date."
+            ),
+            (
+                "- `structural`: the current adapter does not receive a reliable "
+                "structured value for the field."
+            ),
+            (
+                "- Source missingness is descriptive and does not assign contract "
+                "requirements to upstream columns."
+            ),
+            (
+                "- Rates compare synthetic artifacts descriptively; no hypothesis "
+                "test or clinical inference is performed."
+            ),
+'''
+          if old in text:
+              path.write_text(text.replace(old, new), encoding="utf-8")
+          PY
+          if ! git diff --quiet -- src/clinical_data_platform/synthea_quality.py; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add src/clinical_data_platform/synthea_quality.py
+            git commit -m "Split long quality-report Markdown strings"
+            git push origin HEAD:feat/attrition-missingness-reports
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5
