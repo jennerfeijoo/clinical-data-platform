@@ -1,8 +1,8 @@
 # Clinical Data Platform
 
-> Status: active development toward `1.0.0` — version `0.9.0` adds minimal clinical terminology normalization.
+> Status: active development toward `1.0.0` — version `0.10.0` adds complete execution states and durable failure auditing.
 
-Clinical Data Platform is a synthetic clinical data engineering project that demonstrates how healthcare-like source files can become auditable, analysis-ready, terminology-linked datasets.
+Clinical Data Platform is a synthetic clinical data engineering project that demonstrates how healthcare-like source files become auditable, analysis-ready, terminology-linked datasets.
 
 The repository uses only synthetic data. It is intended for engineering review and learning, not for identifiable patient data, clinical decisions, or production healthcare deployment.
 
@@ -20,31 +20,110 @@ Immutable raw capture
 Versioned executable TOML contract
         │
         ▼
+Hash-chained local execution journal
+        │
+        ▼
 Generic validation pipeline
         ├── valid rows
         ├── quarantined rows
         ├── normalized errors
-        └── quality report
+        └── quality report: validated
         │
         ▼
-Formal PostgreSQL migrations V001–V007
+Formal PostgreSQL migrations V001–V008
         │
         ▼
-Terminology resolution
-        ├── source-system aliases
-        ├── active concepts by domain
-        └── reviewed local-to-standard mappings
+Durable execution audit
+        ├── current run state
+        ├── ordered event timeline
+        └── failures retained after clinical rollback
         │
         ▼
-Hybrid clinical persistence
-        ├── patient current snapshot + SCD2 history
-        └── five immutable event entities
+Terminology resolution and clinical persistence
         │
         ▼
 Versioned cohort SQL and feature export
 ```
 
 There is no patient-specific validation pipeline and no monolithic schema installer.
+
+## Complete execution lifecycle
+
+A normal run follows:
+
+```text
+created
+→ raw_captured
+→ validating
+→ validated
+→ loading
+→ completed
+```
+
+A failed load remains auditable:
+
+```text
+validated
+→ loading       attempt 1
+→ failed        attempt 1
+```
+
+After the external problem is corrected, the same validated run can continue:
+
+```text
+failed
+→ loading       attempt 2
+→ completed     attempt 2
+```
+
+`completed` is terminal. Unsupported transitions are rejected by PostgreSQL.
+
+### Why failures survive rollback
+
+Loading uses separate transaction boundaries:
+
+1. the validated run, imported local journal, and `loading` transition are committed;
+2. clinical rows, validation errors, and `completed` are committed atomically;
+3. when step 2 fails, clinical writes roll back and a new transaction stores `failed` with its stage, exception type, message, SQLSTATE, details, and attempt number.
+
+This preserves both requirements:
+
+```text
+no partial clinical data
++ durable evidence of the failed attempt
+```
+
+### Local and durable journals
+
+Validation writes:
+
+```text
+data/processed/<dataset>/execution/<run-id>.jsonl
+```
+
+Each event contains its own SHA-256 and the previous event SHA-256. Before loading, the platform verifies identities, sequence, state transitions, hashes, and chain continuity.
+
+PostgreSQL stores the imported and loading-stage timeline in:
+
+```text
+audit.pipeline_run_events
+```
+
+The current projection is stored in:
+
+```text
+audit.pipeline_runs
+```
+
+Runs created before V008 receive an explicit evidence gap:
+
+```text
+audit_gap_reason = pre_v008_execution_history_unavailable
+```
+
+No historical events are fabricated.
+
+See [`docs/execution-audit.md`](docs/execution-audit.md).
 
 ## Six clinical entities
 
@@ -66,9 +145,7 @@ patients
 | medications | immutable event + terminology binding | `medication_id` |
 | procedures | immutable event + terminology binding | `procedure_id` |
 
-Every event references a patient and encounter. PostgreSQL foreign keys reject orphaned events.
-
-Exact event duplicates preserve the original row and lineage. Reusing an event identifier with different business content raises an integrity error and rolls back the complete dataset load.
+Every event references a patient and encounter. Exact event duplicates preserve the original row and lineage. Reusing an event identifier with different business content rolls back the clinical transaction and leaves a failed execution timeline.
 
 ## Minimal terminology layer
 
@@ -82,75 +159,25 @@ terminology.concept_mappings
 terminology.normalized_clinical_codes
 ```
 
-The installed subset registers:
+The installed subset registers ICD-10-CM, LOINC, RxNorm, ATC, SNOMED CT, CPT, ICD-10-PCS, and the project-local observation system. External systems are represented by small local subsets, not complete releases.
 
-```text
-ICD10CM
-LOINC
-RXNORM
-ATC
-SNOMEDCT
-CPT
-ICD10PCS
-LOCAL_OBSERVATION
-```
+Bundled local-to-LOINC mappings:
 
-External systems are represented by small local subsets. They are not complete releases.
+| Local source code | Normalized code |
+|---|---|
+| `SYSTOLIC_BP` | `LOINC:8480-6` |
+| `DIASTOLIC_BP` | `LOINC:8462-4` |
+| `HEART_RATE` | `LOINC:8867-4` |
 
-### Source and normalized representations
+Unknown systems, unknown codes, inactive concepts, and wrong-domain concepts are rejected during persistence. The resulting failure is audited while clinical rows are rolled back.
 
-The source representation remains in the clinical row:
-
-```text
-LOCAL_OBSERVATION:SYSTOLIC_BP
-```
-
-The row also receives a foreign key to its normalized concept:
-
-```text
-LOINC:8480-6 — Systolic blood pressure
-```
-
-Bundled mappings:
-
-| Local source code | Normalized system | Normalized code |
-|---|---|---|
-| `SYSTOLIC_BP` | LOINC | `8480-6` |
-| `DIASTOLIC_BP` | LOINC | `8462-4` |
-| `HEART_RATE` | LOINC | `8867-4` |
-
-### Strict terminology boundary
-
-A coded row can pass its file contract but fail persistence when:
-
-- its system has no registered alias;
-- its code is absent from the installed subset;
-- its concept is inactive;
-- its concept belongs to the wrong domain.
-
-The complete dataset transaction then rolls back. Raw and processed artifacts remain available for investigation.
-
-### Verification and licensing
-
-Concept entries have one of three local statuses:
-
-```text
-verified
-curated
-unverified
-```
-
-The repository does not redistribute complete terminology releases. CPT descriptors are deliberately omitted, SNOMED CT entries remain subject to applicable licensing, and every external system is marked as an incomplete subset.
-
-See [`docs/terminology.md`](docs/terminology.md) for the precise boundary.
+See [`docs/terminology.md`](docs/terminology.md).
 
 ## Clinical history policy
 
-Every current clinical row has a `record_sha256` calculated from normalized business content. Lineage and terminology foreign keys are excluded so that operational metadata does not create false clinical changes.
+Every current clinical row has a `record_sha256` calculated from normalized business content. Lineage and terminology foreign keys are excluded so operational metadata does not create false clinical changes.
 
-Patient demographic changes close the prior row in `clinical.patient_history` and append a new current version. Encounter, diagnosis, observation, medication, and procedure events are immutable.
-
-The policy is declared in `src/clinical_data_platform/history.py` and enforced by PostgreSQL triggers.
+Patient demographic changes append SCD Type 2 versions to `clinical.patient_history`. Encounter, diagnosis, observation, medication, and procedure events are immutable.
 
 ## Immutable raw landing zone
 
@@ -162,7 +189,7 @@ data/raw/
 └── receipts/<dataset>/<YYYY>/<MM>/<DD>/<receipt-uuid>.json
 ```
 
-Identical files share one content object, while each reception receives a separate append-only receipt. The implementation verifies checksums, byte sizes, paths, and manifest lineage before persistence.
+Identical files share one content object, while each reception has a separate append-only receipt. The implementation verifies checksums, byte sizes, paths, and manifest lineage before persistence.
 
 This is application-level local immutability, not certified WORM storage.
 
@@ -184,9 +211,7 @@ contracts/
 └── procedures/v1.0.0.toml
 ```
 
-The contract engine executes structural, required-value, uniqueness, type, categorical, temporal, unit, and plausible-range rules. Each validation run records contract path, version, and SHA-256.
-
-Contracts define the accepted source interface. PostgreSQL terminology resolution determines whether coded values are recognized by the installed terminology subset.
+The contract engine executes structural, required-value, uniqueness, type, categorical, temporal, unit, and plausible-range rules. Every validation run records exact contract path, version, and SHA-256.
 
 ## PostgreSQL migrations
 
@@ -198,7 +223,8 @@ migrations/
 ├── V004__add_raw_landing_lineage.sql
 ├── V005__add_clinical_history_policy.sql
 ├── V006__add_medications_and_procedures.sql
-└── V007__add_minimal_clinical_terminologies.sql
+├── V007__add_minimal_clinical_terminologies.sql
+└── V008__add_execution_lifecycle_audit.sql
 ```
 
 Migration history is stored in `public.schema_migrations`. The engine verifies contiguous ordering, names, checksums, detected structure, pending versions, and downgrade attempts. Migrations execute transactionally under a PostgreSQL advisory lock.
@@ -206,21 +232,19 @@ Migration history is stored in `public.schema_migrations`. The engine verifies c
 ## Implemented capabilities
 
 - six contract-governed clinical datasets;
-- minimal versioned terminology registry;
-- source-system aliases and normalized clinical concepts;
-- reviewed mappings from local observations to LOINC;
-- strict rejection of unknown, inactive, or wrong-domain codes;
+- explicit run state machine and retry attempts;
+- hash-chained local validation journals;
+- durable PostgreSQL execution timelines and failure metadata;
+- clinical rollback without losing failure evidence;
+- minimal versioned terminology registry and normalized concepts;
 - immutable content-addressed raw capture and append-only receipts;
 - normalized validation errors and rejected-record quarantine;
 - source, raw, contract, run, record, terminology, and cohort lineage;
-- formal PostgreSQL install, upgrade, baseline, and drift checks;
-- current patient snapshot plus SCD Type 2 history;
-- immutable clinical-event conflict protection;
+- formal install, upgrade, baseline, and drift checks;
+- patient SCD Type 2 history and immutable clinical events;
 - transactional and run-idempotent persistence;
-- referential integrity and database constraints;
 - versioned hypertension cohort and baseline features;
-- Docker, Docker Compose, PowerShell, and POSIX workflows;
-- Ruff, strict mypy, pytest, coverage, PostgreSQL integration tests, and GitHub Actions.
+- Docker, Docker Compose, PowerShell, POSIX, Ruff, strict mypy, pytest, coverage, PostgreSQL integration tests, and GitHub Actions.
 
 ## Fastest complete run
 
@@ -243,7 +267,7 @@ POSIX shell:
 sh scripts/run_demo.sh
 ```
 
-The demo captures, validates, migrates, normalizes coded concepts, persists, builds the hypertension cohort, and writes:
+The demo captures, validates, audits, migrates, normalizes coded concepts, persists, builds the hypertension cohort, and writes:
 
 ```text
 data/raw/
@@ -270,9 +294,9 @@ clinical-data run-demo --repository-root .
 A current database reports:
 
 ```text
-detected=7
-current=7
-latest=7
+detected=8
+current=8
+latest=8
 pending=[]
 ```
 
@@ -287,47 +311,51 @@ pending=[]
 | Medications | 7 | 6 | 1 | 6 |
 | Procedures | 7 | 6 | 1 | 6 |
 
-The four coded event tables produce 31 normalized terminology bindings. The default hypertension cohort contains `P001` and `P002`.
+The clean demo produces six completed runs with six events each, 31 normalized terminology bindings, and a hypertension cohort containing `P001` and `P002`.
 
-## Inspect normalized codes
+## Inspect execution state
 
 ```sql
 SELECT
+    run_id,
     dataset_name,
-    entity_id,
-    source_system,
-    source_code,
-    normalized_system,
-    normalized_code,
-    normalized_display,
-    domain,
-    verification_status
-FROM terminology.normalized_clinical_codes
-ORDER BY dataset_name, entity_id;
+    status,
+    current_stage,
+    attempt_count,
+    failure_code,
+    failure_message,
+    audit_event_count,
+    audit_gap_reason
+FROM audit.pipeline_runs
+ORDER BY updated_at DESC;
 ```
 
-## Python terminology API
+Timeline for one run:
 
-```python
-from clinical_data_platform.terminology import (
-    list_terminology_systems,
-    resolve_terminology_concept,
-    validate_terminology_bindings,
-)
+```sql
+SELECT
+    sequence_number,
+    attempt_number,
+    from_status,
+    to_status,
+    stage,
+    occurred_at,
+    error_code,
+    error_message,
+    event_sha256
+FROM audit.pipeline_run_timeline
+WHERE run_id = '<run-uuid>'
+ORDER BY sequence_number;
 ```
 
-Example:
+Python API:
 
 ```python
-concept = resolve_terminology_concept(
-    connection,
-    "LOCAL_OBSERVATION",
-    "SYSTOLIC_BP",
-    "observation",
+from clinical_data_platform.run_audit import (
+    get_pipeline_run,
+    list_pipeline_run_events,
+    validate_pipeline_run_audit,
 )
-
-assert concept.code_system_id == "LOINC"
-assert concept.code == "8480-6"
 ```
 
 ## Quality checks
@@ -342,33 +370,32 @@ python -m pytest --cov=clinical_data_platform --cov-report=term-missing
 docker build --tag clinical-data-platform:local .
 ```
 
-CI exercises contracts, V001–V007 migrations, raw capture, patient history, all six entities, terminology resolution and rejection, immutable-event rollback, cohort generation, and container smoke tests.
+CI exercises contracts, V001–V008 migrations, raw capture, local and durable audit chains, retries, failure rollback, patient history, six entities, terminology resolution, cohort generation, and container smoke tests.
 
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md): system architecture and boundaries;
 - [`docs/database.md`](docs/database.md): migrations, persistence, and lineage;
+- [`docs/execution-audit.md`](docs/execution-audit.md): lifecycle, transactions, retries, and inspection;
 - [`docs/clinical-history-policy.md`](docs/clinical-history-policy.md): snapshot and immutable-event policy;
 - [`docs/clinical-entities.md`](docs/clinical-entities.md): six-entity model;
-- [`docs/terminology.md`](docs/terminology.md): terminology model, mappings, and licensing boundary;
+- [`docs/terminology.md`](docs/terminology.md): terminology model and licensing boundary;
 - [`docs/analysis-guide.md`](docs/analysis-guide.md): review sequence and SQL;
-- [`docs/learning/minimal-clinical-terminologies-es.md`](docs/learning/minimal-clinical-terminologies-es.md): detailed Spanish study guide;
+- [`docs/learning/execution-audit-es.md`](docs/learning/execution-audit-es.md): detailed Spanish study guide;
 - additional learning guides under [`docs/learning/`](docs/learning/).
 
 ## Current limitations
 
 The repository is not yet version `1.0.0`. Remaining milestones include:
 
-- complete execution states and structured logging;
+- structured application logging;
 - reproducible Synthea datasets;
 - bulk PostgreSQL `COPY` loading and benchmarks;
 - an additional cohort with attrition and missingness reporting;
 - coverage of at least 90%;
 - multi-version CI, security, container, and release hardening.
 
-The terminology layer remains a small local subset. It does not provide complete releases, automated synchronization, hierarchy queries, UCUM normalization, multilingual terms, FHIR terminology operations, or clinical validation of code selection.
-
-The project intentionally excludes identifiable patient data, production decision support, enterprise authentication, and regulatory deployment claims.
+The execution journal is tamper-evident but not administrator-resistant WORM storage. The terminology layer remains a small local subset. The project intentionally excludes identifiable patient data, production decision support, enterprise authentication, and regulatory deployment claims.
 
 ## License
 
