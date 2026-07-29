@@ -1,9 +1,11 @@
 import csv
 import json
+import os
 from pathlib import Path
 
 import pytest
 
+from clinical_data_platform import synthea_quality
 from clinical_data_platform.cohort_cli import build_parser
 from clinical_data_platform.synthea import SyntheaManifestError, adapt_synthea_csv
 from clinical_data_platform.synthea_cohorts import (
@@ -65,6 +67,8 @@ def test_quality_report_is_deterministic_and_reconciles_attrition(
         second.comparison.comparison_fingerprint
     )
     assert len(first.quality_fingerprint) == 64
+    assert first.manifest_path.parent == (tmp_path / "quality_1").resolve()
+    assert ".staging-" not in str(first.comparison.manifest_path)
 
     manifest = json.loads(first.manifest_path.read_text(encoding="utf-8"))
     assert manifest["schema_version"] == "1.0.0"
@@ -177,6 +181,92 @@ def test_quality_report_output_requires_explicit_replacement(tmp_path: Path) -> 
         replace=True,
     )
     assert replaced.manifest_path.exists()
+    assert not list(tmp_path.glob(".quality.staging-*"))
+    assert not list(tmp_path.glob(".quality.backup-*"))
+
+
+@pytest.mark.parametrize("output_kind", ["cohort", "ancestor", "descendant"])
+def test_quality_report_rejects_output_overlap_without_deleting_inputs(
+    tmp_path: Path,
+    output_kind: str,
+) -> None:
+    cohort_a, cohort_b = _adapt_pair(tmp_path)
+    sentinel = cohort_a / "patients.csv"
+    original = sentinel.read_bytes()
+    if output_kind == "cohort":
+        output = cohort_a
+    elif output_kind == "ancestor":
+        output = tmp_path
+    else:
+        output = cohort_a / "quality"
+
+    with pytest.raises(SyntheaQualityReportError, match="overlaps"):
+        generate_synthea_quality_report(
+            cohort_a,
+            cohort_b,
+            output,
+            replace=True,
+        )
+
+    assert sentinel.exists()
+    assert sentinel.read_bytes() == original
+    assert cohort_b.exists()
+
+
+def test_invalid_replacement_preserves_previous_report(tmp_path: Path) -> None:
+    cohort_a, cohort_b = _adapt_pair(tmp_path)
+    output = tmp_path / "quality"
+    first = generate_synthea_quality_report(cohort_a, cohort_b, output)
+    original_manifest = first.manifest_path.read_bytes()
+
+    patients_path = cohort_a / "patients.csv"
+    patients_path.write_text(
+        patients_path.read_text(encoding="utf-8").replace("P001", "P999", 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(SyntheaManifestError, match="hash mismatch"):
+        generate_synthea_quality_report(
+            cohort_a,
+            cohort_b,
+            output,
+            replace=True,
+        )
+
+    assert (output / "synthea-quality-report.json").read_bytes() == original_manifest
+    assert not list(tmp_path.glob(".quality.staging-*"))
+    assert not list(tmp_path.glob(".quality.backup-*"))
+
+
+def test_publication_failure_restores_previous_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cohort_a, cohort_b = _adapt_pair(tmp_path)
+    output = tmp_path / "quality"
+    first = generate_synthea_quality_report(cohort_a, cohort_b, output)
+    original_manifest = first.manifest_path.read_bytes()
+    real_replace = os.replace
+    call_count = 0
+
+    def fail_second_replace(source: os.PathLike[str], target: os.PathLike[str]) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise OSError("simulated publication failure")
+        real_replace(source, target)
+
+    monkeypatch.setattr(synthea_quality.os, "replace", fail_second_replace)
+    with pytest.raises(OSError, match="simulated publication failure"):
+        generate_synthea_quality_report(
+            cohort_a,
+            cohort_b,
+            output,
+            replace=True,
+        )
+
+    assert (output / "synthea-quality-report.json").read_bytes() == original_manifest
+    assert not list(tmp_path.glob(".quality.staging-*"))
+    assert not list(tmp_path.glob(".quality.backup-*"))
 
 
 def test_cohort_cli_exposes_quality_report_command() -> None:
