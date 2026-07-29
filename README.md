@@ -1,6 +1,6 @@
 # Clinical Data Platform
 
-> Status: active development toward `1.0.0` — version `0.7.0` adds an explicit hybrid clinical-history policy.
+> Status: active development toward `1.0.0` — version `0.8.0` completes the six-entity clinical model.
 
 Clinical Data Platform is a synthetic clinical data engineering project that demonstrates how healthcare-like source files can become auditable, analysis-ready datasets.
 
@@ -32,7 +32,7 @@ Formal PostgreSQL migrations
         ▼
 Hybrid clinical persistence
         ├── patient current snapshot + SCD2 history
-        └── immutable clinical events
+        └── five immutable event entities
         │
         ▼
 Versioned cohort SQL and feature export
@@ -40,22 +40,75 @@ Versioned cohort SQL and feature export
 
 There is no patient-specific validation pipeline and no monolithic schema installer.
 
+## Six clinical entities
+
+```text
+patients
+   └── encounters
+          ├── diagnoses
+          ├── observations
+          ├── medications
+          └── procedures
+```
+
+| Dataset | Storage policy | Primary identifier |
+|---|---|---|
+| patients | current snapshot + SCD Type 2 history | `patient_id` |
+| encounters | immutable event | `encounter_id` |
+| diagnoses | immutable event | `diagnosis_id` |
+| observations | immutable event | `observation_id` |
+| medications | immutable event | `medication_id` |
+| procedures | immutable event | `procedure_id` |
+
+Every event references a patient and encounter. PostgreSQL foreign keys reject orphaned events.
+
+Exact event duplicates are no-ops that preserve original lineage. Reusing an event identifier with different business content raises an integrity error and rolls back the complete dataset load.
+
+## Medication model
+
+Medication events include:
+
+```text
+medication_id
+patient_id
+encounter_id
+code_system
+medication_code
+status
+start_datetime
+end_datetime
+dose_value
+dose_unit
+route
+source_system
+```
+
+The executable contract accepts `RXNORM` and `ATC` as declared code-system names. It validates status, route, types, and temporal order. PostgreSQL additionally enforces foreign keys, positive dose, paired dose value/unit, record hashing, and immutability.
+
+## Procedure model
+
+Procedure events include:
+
+```text
+procedure_id
+patient_id
+encounter_id
+code_system
+procedure_code
+procedure_datetime
+status
+source_system
+```
+
+The contract accepts `SNOMED`, `CPT`, and `ICD10PCS` as declared code-system names. It does not yet validate individual codes against external terminology releases.
+
 ## Clinical history policy
 
-The persistence model is explicit rather than relying on generic destructive upserts.
+Every current clinical row has a `record_sha256` calculated from normalized business content. Lineage fields are excluded so that re-receiving the same content does not create a false change.
 
-| Dataset | Policy | Behavior |
-|---|---|---|
-| patients | SCD Type 2 snapshot | current state in `clinical.patients`; business changes append versions to `clinical.patient_history` |
-| encounters | immutable event | exact duplicate is a no-op; same ID with different content is rejected |
-| diagnoses | immutable event | exact duplicate is a no-op; same ID with different content is rejected |
-| observations | immutable event | exact duplicate is a no-op; same ID with different content is rejected |
+Patient demographic changes close the prior row in `clinical.patient_history` and append a new current version. Encounter, diagnosis, observation, medication, and procedure events are immutable.
 
-Every current clinical row has a `record_sha256` calculated from normalized business content. Lineage fields are excluded so that re-receiving the same clinical content does not create a false historical change.
-
-Patient changes close the previous history version and append a new current version. Immutable-event conflicts raise a PostgreSQL integrity error and roll back the complete dataset load, including its pending audit row.
-
-The policy is declared in `src/clinical_data_platform/history.py` and enforced by migration V005.
+The policy is declared in `src/clinical_data_platform/history.py` and enforced by migrations V005 and V006.
 
 ## Immutable raw landing zone
 
@@ -63,74 +116,57 @@ Sources are captured before parsing under:
 
 ```text
 data/raw/
-├── objects/
-│   └── sha256/<prefix>/<sha256>/source.csv
-└── receipts/
-    └── <dataset>/<YYYY>/<MM>/<DD>/<receipt-uuid>.json
+├── objects/sha256/<prefix>/<sha256>/source.csv
+└── receipts/<dataset>/<YYYY>/<MM>/<DD>/<receipt-uuid>.json
 ```
 
-The object path is derived from the file bytes. Identical files share one object, while every receipt event receives its own append-only manifest.
+Identical files share one content object, while each reception receives a separate append-only receipt. The local implementation provides checksum verification, content deduplication, staging, atomic publication, no application-level replacement, read-only permissions, path-traversal protection, and lineage verification.
 
-The landing implementation provides:
-
-- SHA-256 and byte-size verification;
-- content-based deduplication;
-- staging plus atomic publication;
-- no replacement of existing final paths;
-- local read-only permissions;
-- receipt and object integrity verification;
-- path traversal protection;
-- validation from the captured raw object rather than the external source;
-- PostgreSQL lineage for the raw receipt and object.
-
-Local read-only permissions are not equivalent to certified WORM storage. The project does not claim protection from administrators, regulatory retention, object-store durability, or production PHI controls.
+This is application-level local immutability, not certified WORM storage.
 
 ## Executable contracts
 
-Active contract versions are selected by:
+Active versions are selected by:
 
 ```text
 src/clinical_data_platform/contracts/manifest.toml
 ```
 
-Published contracts are retained:
-
 ```text
-src/clinical_data_platform/contracts/
+contracts/
 ├── patients/v1.0.0.toml
 ├── encounters/v1.0.0.toml
 ├── diagnoses/v1.0.0.toml
-└── observations/v1.0.0.toml
+├── observations/v1.0.0.toml
+├── medications/v1.0.0.toml
+└── procedures/v1.0.0.toml
 ```
 
-The contract engine executes structural, required-value, uniqueness, type, vocabulary, temporal, unit, and plausible-range rules. Every validation run records contract path, semantic version, and SHA-256.
+The contract engine executes structural, required-value, uniqueness, type, categorical, temporal, unit, and plausible-range rules. Each validation run records contract path, semantic version, and SHA-256.
 
 ## PostgreSQL migrations
 
-The database is created and upgraded through immutable packaged migrations:
-
 ```text
-src/clinical_data_platform/migrations/
+migrations/
 ├── V001__create_core_clinical_schema.sql
 ├── V002__add_longitudinal_entities_and_cohorts.sql
 ├── V003__add_contract_lineage.sql
 ├── V004__add_raw_landing_lineage.sql
-└── V005__add_clinical_history_policy.sql
+├── V005__add_clinical_history_policy.sql
+└── V006__add_medications_and_procedures.sql
 ```
 
-Migration history is stored in `public.schema_migrations`. The engine verifies contiguous ordering, names, checksums, current structure, and pending versions. Migrations execute transactionally under a PostgreSQL advisory lock.
+Migration history is stored in `public.schema_migrations`. The engine verifies contiguous ordering, names, checksums, detected structure, pending versions, and downgrade attempts. Migrations execute transactionally under a PostgreSQL advisory lock.
 
 ## Implemented capabilities
 
-- generic contract-governed validation for all datasets;
-- active contract manifest and retained contract versions;
+- six contract-governed clinical datasets;
 - immutable content-addressed raw capture and append-only receipts;
 - normalized validation errors and rejected-record quarantine;
 - source, raw, contract, run, record, and cohort lineage;
-- formal PostgreSQL migrations with install, upgrade, baseline, and drift tests;
-- patients, encounters, diagnoses, and observations;
-- current patient snapshot plus SCD Type 2 patient history;
-- immutable encounter, diagnosis, and observation semantics;
+- formal PostgreSQL install, upgrade, baseline, and drift checks;
+- current patient snapshot plus SCD Type 2 history;
+- immutable clinical-event conflict protection;
 - transactional and run-idempotent persistence;
 - referential integrity and database constraints;
 - versioned hypertension cohort and baseline features;
@@ -158,7 +194,7 @@ POSIX shell:
 sh scripts/run_demo.sh
 ```
 
-The demo creates or reuses raw objects, writes new receipt manifests, migrates PostgreSQL, validates and loads all datasets, builds the cohort, and writes:
+The demo captures, validates, migrates, persists, builds the hypertension cohort, and writes:
 
 ```text
 data/raw/
@@ -176,70 +212,10 @@ python -m pip install -e ".[dev]"
 Copy-Item .env.example .env
 docker compose up -d postgres
 $env:DATABASE_URL = "postgresql://clinical_user:clinical_password@localhost:5432/clinical_data"
-```
 
-Apply and validate migrations:
-
-```powershell
 clinical-data database-migrate
 clinical-data database-validate
-```
-
-Run the complete workflow:
-
-```powershell
 clinical-data run-demo --repository-root .
-```
-
-## Raw commands
-
-Capture one source independently:
-
-```powershell
-clinical-data raw-capture patients data/sample/patients.csv `
-  --raw-root data/raw
-```
-
-Verify a receipt using its path relative to `data/raw`:
-
-```powershell
-clinical-data raw-verify `
-  receipts/patients/2026/07/29/<receipt-uuid>.json `
-  --raw-root data/raw
-```
-
-Validation captures automatically and then reads the captured object:
-
-```powershell
-clinical-data validate-dataset patients data/sample/patients.csv `
-  --raw-root data/raw `
-  --output-dir data/processed/patients `
-  --reference-date 2026-07-29
-```
-
-Persistence verifies the raw receipt and object before opening the write transaction:
-
-```powershell
-clinical-data load-dataset patients `
-  --raw-root data/raw `
-  --output-dir data/processed/patients
-```
-
-## Main CLI
-
-```text
-clinical-data list-contracts
-clinical-data show-contract
-clinical-data validate-contracts
-clinical-data raw-capture
-clinical-data raw-verify
-clinical-data database-status
-clinical-data database-migrate
-clinical-data database-validate
-clinical-data validate-dataset
-clinical-data load-dataset
-clinical-data build-hypertension-cohort
-clinical-data run-demo
 ```
 
 ## Expected bundled sample
@@ -250,78 +226,29 @@ clinical-data run-demo
 | Encounters | 8 | 7 | 1 | 1 | 1.0.0 |
 | Diagnoses | 7 | 6 | 1 | 2 | 1.0.0 |
 | Observations | 14 | 13 | 1 | 1 | 1.0.0 |
+| Medications | 7 | 6 | 1 | 1 | 1.0.0 |
+| Procedures | 7 | 6 | 1 | 1 | 1.0.0 |
 
 The default hypertension cohort contains `P001` and `P002`.
 
-## Inspect clinical history
-
-Current snapshots:
+## Review entity counts
 
 ```sql
-SELECT
-    patient_id,
-    sex_at_birth,
-    birth_date,
-    death_date,
-    record_sha256,
-    source_run_id
-FROM clinical.patients
-ORDER BY patient_id;
+SELECT 'patients' AS dataset, COUNT(*) FROM clinical.patients
+UNION ALL
+SELECT 'encounters', COUNT(*) FROM clinical.encounters
+UNION ALL
+SELECT 'diagnoses', COUNT(*) FROM clinical.diagnoses
+UNION ALL
+SELECT 'observations', COUNT(*) FROM clinical.observations
+UNION ALL
+SELECT 'medications', COUNT(*) FROM clinical.medications
+UNION ALL
+SELECT 'procedures', COUNT(*) FROM clinical.procedures
+ORDER BY dataset;
 ```
 
-Patient history:
-
-```sql
-SELECT
-    patient_id,
-    sex_at_birth,
-    death_date,
-    valid_from_run_id,
-    valid_to_run_id,
-    valid_from,
-    valid_to,
-    is_current,
-    record_sha256
-FROM clinical.patient_history
-ORDER BY patient_id, patient_version_id;
-```
-
-Immutable events retain their original accepted lineage:
-
-```sql
-SELECT
-    encounter_id,
-    patient_id,
-    record_sha256,
-    source_run_id,
-    loaded_at
-FROM clinical.encounters
-ORDER BY encounter_id;
-```
-
-## Lineage recorded per run
-
-`quality_report.json` contains:
-
-```text
-run_id
-input_path
-input_sha256
-raw_storage_version
-raw_receipt_id
-raw_received_at
-raw_manifest_path
-raw_manifest_sha256
-raw_object_path
-raw_size_bytes
-contract_path
-contract_version
-contract_sha256
-reference_date
-row counts and rule counts
-```
-
-`audit.pipeline_runs` persists the same raw and contract lineage. Clinical tables add `record_sha256`, and patient history records the runs that opened and closed each version.
+Expected counts after a clean demo: 5 patients, 7 encounters, 6 diagnoses, 13 observations, 6 medications, and 6 procedures.
 
 ## Quality checks
 
@@ -335,26 +262,22 @@ python -m pytest --cov=clinical_data_platform --cov-report=term-missing
 docker build --tag clinical-data-platform:local .
 ```
 
-CI exercises migrations, raw capture, contract validation, history semantics, immutable-event conflict rollback, and container smoke tests.
+CI exercises contract validation, migrations, raw capture, patient history, all six entities, immutable-event rollback, cohort generation, and container smoke tests.
 
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md): system architecture and boundaries;
 - [`docs/database.md`](docs/database.md): migrations, persistence, and lineage;
-- [`docs/clinical-history-policy.md`](docs/clinical-history-policy.md): operational history policy;
-- [`docs/analysis-guide.md`](docs/analysis-guide.md): technical review sequence and SQL;
-- [`docs/learning/generic-dataset-architecture-es.md`](docs/learning/generic-dataset-architecture-es.md);
-- [`docs/learning/versioned-executable-contracts-es.md`](docs/learning/versioned-executable-contracts-es.md);
-- [`docs/learning/database-migrations-es.md`](docs/learning/database-migrations-es.md);
-- [`docs/learning/immutable-raw-landing-zone-es.md`](docs/learning/immutable-raw-landing-zone-es.md);
-- [`docs/learning/clinical-history-policy-es.md`](docs/learning/clinical-history-policy-es.md);
-- [`docs/hypertension-cohort.md`](docs/hypertension-cohort.md).
+- [`docs/clinical-history-policy.md`](docs/clinical-history-policy.md): snapshot and immutable-event policy;
+- [`docs/clinical-entities.md`](docs/clinical-entities.md): six-entity model;
+- [`docs/analysis-guide.md`](docs/analysis-guide.md): review sequence and SQL;
+- [`docs/learning/six-clinical-entities-es.md`](docs/learning/six-clinical-entities-es.md): detailed Spanish study guide;
+- additional learning guides under [`docs/learning/`](docs/learning/).
 
 ## Current limitations
 
 The repository is not yet version `1.0.0`. Remaining milestones include:
 
-- medications and procedures as the fifth and sixth clinical entities;
 - terminology normalization;
 - complete execution states and structured logging;
 - reproducible Synthea datasets;
@@ -362,9 +285,7 @@ The repository is not yet version `1.0.0`. Remaining milestones include:
 - an additional cohort with attrition and missingness reporting;
 - stronger coverage, multi-version CI, security, container, and release hardening.
 
-The history policy does not yet model tombstones, bitemporal valid time, formal correction messages, patient identity merges, or event supersession.
-
-It intentionally excludes identifiable patient data, production decision support, enterprise authentication, and regulatory deployment claims.
+The project intentionally excludes identifiable patient data, production decision support, enterprise authentication, and regulatory deployment claims.
 
 ## License
 
