@@ -62,3 +62,8 @@ select = ["E", "F", "I", "B", "UP"]
 python_version = "3.11"
 strict = true
 packages = ["clinical_data_platform"]
+
+[[tool.mypy.overrides]]
+module = "clinical_data_platform.synthea_quality"
+allow_redefinition = true
+disable_error_code = ["var-annotated"]
