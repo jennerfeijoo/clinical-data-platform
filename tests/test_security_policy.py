@@ -73,15 +73,17 @@ def test_bandit_baseline_contains_only_two_reviewed_constant_sql_findings() -> N
     }
 
 
-def test_container_runtime_excludes_global_build_and_scan_only_packages() -> None:
+def test_container_runtime_has_no_package_manager_or_global_site_packages() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
     assert "FROM python:3.11-slim AS builder" in dockerfile
     assert "FROM python:3.11-slim AS runtime" in dockerfile
     assert "COPY --from=builder /opt/venv /opt/venv" in dockerfile
     assert 'PATH="/opt/venv/bin:$PATH"' in dockerfile
-    for package in ("pip", "setuptools", "wheel", "msgpack", "jaraco.context"):
-        assert package in dockerfile
+    assert "/opt/venv/bin/python -m pip uninstall -y" in dockerfile
+    assert "/usr/local/lib/python3.11/ensurepip" in dockerfile
+    assert "/usr/local/lib/python3.11/site-packages/*" in dockerfile
+    assert "/usr/local/bin/pip*" in dockerfile
 
 
 def test_dependabot_covers_python_actions_and_docker() -> None:
