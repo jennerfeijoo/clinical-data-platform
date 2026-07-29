@@ -9,6 +9,11 @@ import pytest
 from clinical_data_platform.database import persist_dataset_validation_outputs
 from clinical_data_platform.migration import migrate_database
 from clinical_data_platform.pipeline import run_dataset_validation
+from clinical_data_platform.run_audit import (
+    get_pipeline_run,
+    list_pipeline_run_events,
+    validate_pipeline_run_audit,
+)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_DIRECTORY = REPOSITORY_ROOT / "data" / "sample"
@@ -109,9 +114,11 @@ def test_medications_and_procedures_are_loaded_with_expected_optional_values(
     assert medication_validation.rows_valid == 6
     assert medication_validation.rows_invalid == 1
     assert medication_load.records_upserted == 6
+    assert medication_load.final_status == "completed"
     assert procedure_validation.rows_valid == 6
     assert procedure_validation.rows_invalid == 1
     assert procedure_load.records_upserted == 6
+    assert procedure_load.final_status == "completed"
 
     active_medication = connection.execute(
         """
@@ -161,7 +168,7 @@ def test_medications_and_procedures_are_loaded_with_expected_optional_values(
         ),
     ],
 )
-def test_new_clinical_entities_preserve_duplicates_and_reject_conflicts(
+def test_new_clinical_entities_preserve_duplicates_and_audit_conflicts(
     tmp_path: Path,
     clean_database_connection: psycopg.Connection[Any],
     dataset: str,
@@ -231,10 +238,25 @@ def test_new_clinical_entities_preserve_duplicates_and_reject_conflicts(
         f"WHERE {identity_column} = %s",
         (identity,),
     ).fetchone()
-    failed_run = connection.execute(
-        "SELECT COUNT(*) FROM audit.pipeline_runs WHERE run_id = %s",
-        (conflict.run_id,),
-    ).fetchone()
+    snapshot = get_pipeline_run(connection, conflict.run_id)
+    events = list_pipeline_run_events(connection, conflict.run_id)
+    audit_validation = validate_pipeline_run_audit(connection, conflict.run_id)
 
     assert preserved == original
-    assert failed_run == (0,)
+    assert snapshot.status == "failed"
+    assert snapshot.current_stage == "persistence"
+    assert snapshot.attempt_count == 1
+    assert snapshot.failed_at is not None
+    assert snapshot.failure_message is not None and error in snapshot.failure_message
+    assert snapshot.failure_type is not None
+    assert [event.to_status for event in events] == [
+        "created",
+        "raw_captured",
+        "validating",
+        "validated",
+        "loading",
+        "failed",
+    ]
+    assert events[-1].error_message is not None and error in events[-1].error_message
+    assert audit_validation.current_status == "failed"
+    assert audit_validation.event_count == 6
