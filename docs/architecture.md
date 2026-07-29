@@ -7,54 +7,158 @@ The repository is a portfolio-grade synthetic clinical data engineering platform
 ## End-to-end flow
 
 ```text
-CLI command
+Pinned Synthea profile
+    ├── upstream tag and resolved commit
+    ├── random and clinician seeds
+    ├── reference date and geography
+    ├── single-thread generation
+    └── exact exporter configuration
+            │
+            ▼
+Synthea CSV generation
+    ├── exact v4.0.0 headers
+    ├── per-file SHA-256
+    └── generation manifest and dataset fingerprint
+            │
+            ▼
+Deterministic adapter
+    ├── six contract-ready datasets
+    ├── UUIDv5 event identities
+    ├── explicit omitted-row counts
+    ├── unverified terminology candidates
+    └── adaptation manifest and fingerprint
+            │
+            └──────────────┐
+                           ▼
+CLI command or external CSV source
     ├── stdout: requested command result
     └── stderr: structured operational logs
             │
             └── correlation_id propagated through nested operations
-
-External CSV source
-        │
-        ▼
+                           │
+                           ▼
 Immutable raw landing zone
-        ├── content-addressed object
-        └── append-only receipt
-        │
-        ▼
+    ├── content-addressed object
+    └── append-only receipt
+                           │
+                           ▼
 Versioned executable contract
-        │
-        ▼
+                           │
+                           ▼
 Hash-chained local execution journal
-        │
-        ▼
+                           │
+                           ▼
 Generic validation pipeline
-        ├── valid rows
-        ├── quarantine
-        ├── normalized errors
-        └── quality report: validated
-        │
-        ▼
+    ├── valid rows
+    ├── quarantine
+    ├── normalized errors
+    └── quality report: validated
+                           │
+                           ▼
 Formal migrations V001–V008
-        │
-        ▼
+                           │
+                           ▼
 Durable execution audit
-        ├── current-state projection
-        ├── ordered event timeline
-        └── failure retained after clinical rollback
-        │
-        ▼
+    ├── current-state projection
+    ├── ordered event timeline
+    └── failure retained after clinical rollback
+                           │
+                           ▼
 Terminology resolution
-        │
-        ▼
+                           │
+                           ▼
 Hybrid PostgreSQL persistence
-        ├── patient snapshot + SCD2 history
-        └── immutable clinical events
-        │
-        ▼
+    ├── patient snapshot + SCD2 history
+    └── immutable clinical events
+                           │
+                           ▼
 Versioned cohort SQL and feature export
 ```
 
-Structured logs observe operations throughout this flow. They do not replace raw, contract, run, record, terminology, or cohort lineage.
+Synthea is a source workflow, not a parallel data platform. Adapted files enter the same raw, contract, execution, terminology, persistence, audit, and logging layers as any other source.
+
+## Synthea reproducibility model
+
+### Profile identity
+
+The packaged TOML profile has its own SHA-256 and pins:
+
+```text
+upstream repository
+release tag
+upstream version
+minimum Java version
+population size
+random seed
+clinician seed
+reference date
+state and optional city
+thread pool size
+history window
+included CSV files
+```
+
+The resolved upstream commit is recorded after checkout verification. The checkout must match the configured tag exactly and contain no uncommitted changes.
+
+### Generation identity
+
+```text
+profile SHA-256
++ upstream commit
++ source file hashes, sizes, counts, and headers
+→ dataset fingerprint
+```
+
+The generation manifest records the normalized command with machine-specific directories replaced by placeholders. Individual source hashes identify the actual bytes.
+
+### Adaptation identity
+
+```text
+adapter version
++ profile SHA-256
++ source fingerprints
++ output fingerprints
++ omitted-row reasons
+→ adaptation fingerprint
+```
+
+The output manifest makes post-adaptation modification detectable.
+
+### Deterministic event identities
+
+Synthea CSV rows without a source event ID receive UUIDv5 identifiers derived from a fixed namespace, dataset, source file, source row number, and canonical row content.
+
+These UUIDs are deterministic technical identities for one adapter version. They are not universal clinical identifiers.
+
+### Source schema boundary
+
+The adapter requires exact Synthea 4.0.0 headers for:
+
+```text
+patients.csv
+encounters.csv
+conditions.csv
+observations.csv
+medications.csv
+procedures.csv
+```
+
+Schema drift fails before row transformation. A new upstream schema requires explicit adapter review and versioning.
+
+### Observation subset
+
+The current internal observation contract accepts only systolic blood pressure, diastolic blood pressure, and heart rate. Other Synthea observations are omitted with reason counts. This prevents silent conversion of a broad upstream observation model into a narrow internal model.
+
+### Terminology boundary
+
+The adapter emits terminology candidates used by diagnoses, medications, and procedures. During loading:
+
+- existing concepts are reused;
+- missing concepts are added to registered canonical systems;
+- imported concepts are marked `unverified`;
+- domain conflicts are rejected.
+
+This supports source ingestion without claiming complete or independently verified terminology coverage.
 
 ## Clinical relationship model
 
@@ -67,7 +171,7 @@ patients
           └── procedures   → procedure concept
 ```
 
-The six datasets use the same raw, contract, execution, persistence, audit, and logging algorithms. Dataset-specific behavior remains confined to contracts, row builders, SQL, migrations, terminology bindings, and explicit history policies.
+The six datasets use the same core algorithms. Dataset-specific behavior remains confined to contracts, adapters, row builders, SQL, migrations, terminology bindings, and explicit history policies.
 
 ## Execution state model
 
@@ -80,21 +184,20 @@ created
 → completed
 ```
 
-Active stages may transition to `failed`. A failed loading execution may retry through `failed → loading`; `completed` is terminal.
+Active stages may transition to `failed`. A failed load may retry through `failed → loading`; `completed` is terminal.
 
 The architecture uses two audit representations:
 
 ```text
 local JSONL journal
-    → exists before PostgreSQL is required
     → covers initialization, raw capture, and validation
 
 PostgreSQL event timeline
-    → imports the verified local journal
-    → adds loading, failure, retry, and completion events
+    → imports the local journal
+    → adds loading, failure, retry, and completion
 ```
 
-Both are linked by SHA-256 event chains. The quality report records the local event count and head hash. `audit.pipeline_runs` stores the current durable head, while `audit.pipeline_run_events` stores the complete ordered timeline.
+Both are linked by SHA-256 event chains.
 
 ## Transaction topology
 
@@ -117,11 +220,9 @@ Transaction C, only after B fails
     → COMMIT
 ```
 
-This topology prevents partial clinical data while preserving evidence of failed attempts.
+This prevents partial clinical data while preserving durable failure evidence.
 
 ## Observability model
-
-The application produces three different kinds of evidence:
 
 ```text
 clinical and analytical data
@@ -131,55 +232,10 @@ execution audit
     → authoritative state, attempts, timestamps, and durable failures
 
 structured logs
-    → operational telemetry, timing, component context, and diagnostics
+    → operational telemetry, timing, context, and diagnostics
 ```
 
-The logging schema is versioned independently as `1.0.0`.
-
-Every JSON record contains:
-
-```text
-schema_version
-timestamp
-level
-event
-component
-message
-```
-
-Relevant operations add:
-
-```text
-correlation_id
-run_id
-dataset
-cohort_run_id
-operation
-stage
-outcome
-duration_ms
-attempt_number
-error_type
-error_code
-error_message
-aggregate counts
-```
-
-### Context topology
-
-```text
-correlation_id
-    ├── run_id A
-    │       └── attempt 1, attempt 2, ...
-    ├── run_id B
-    └── cohort_run_id
-```
-
-A `correlation_id` represents one invocation context. It is not a durable lineage key and may be absent if an external caller bypasses the instrumented boundary. Instrumented direct library operations create one when none exists.
-
-Python `contextvars` propagates context through nested synchronous calls and restores the previous context when a scope exits. This avoids adding observability-only parameters to domain function signatures.
-
-### Event pairs
+A `correlation_id` represents one observable invocation. A dataset `run_id` remains the durable execution identity. `contextvars` propagates contextual fields without changing domain function signatures.
 
 Measured operations produce:
 
@@ -195,105 +251,75 @@ or:
 <event>.failed
 ```
 
-The final event records a monotonic duration and outcome. Exceptions are re-raised after logging.
-
-### Output boundary
-
-```text
-stdout
-    → user-facing command result
-
-stderr
-    → structured telemetry
-```
-
-File rotation, retention, collection, transport, and access control are deployment concerns and are not implemented by the repository.
-
-### Data minimization
-
-Logs contain aggregate counts, hashes, versions, stages, and technical errors. They must not contain clinical rows.
-
-The logging layer defensively redacts known clinical identifier fields, rejected values, records, credentials, database URLs, PostgreSQL key values, and `DETAIL:` lines. Redaction is a secondary defense; the primary rule is not to pass clinical values to logging calls.
-
-## Terminology relationship model
-
-```text
-source system label
-        │
-        ▼
-terminology.system_aliases
-        │
-        ▼
-source concept
-        │
-        ├── direct normalized concept
-        └── terminology.concept_mappings
-                │
-                ▼
-            target concept
-```
-
-The source representation remains in the clinical table. `normalized_concept_id` records the resolved concept used by the local platform.
+Logs contain aggregate counts, hashes, versions, stages, and sanitized technical errors. They must not contain clinical rows.
 
 ## Core modules
 
+### `synthea.py`
+
+Loads and validates the pinned profile, builds the shell-free generator command, verifies the clean tagged checkout and Java version, fingerprints upstream files, adapts the six CSVs, generates UUIDv5 identities, records omitted rows, creates terminology candidates, verifies manifests, and loads adapted datasets through the existing platform.
+
+### `synthea_profiles/`
+
+Contains packaged, versioned generation profiles included in the Python distribution.
+
 ### `entrypoint.py`
 
-Configures logging before CLI dispatch, creates command correlation context, and emits command started, completed, or failed events.
+Configures logging before CLI dispatch and creates command correlation context.
 
 ### `structured_logging.py`
 
-Defines schema versioning, JSON and text formatters, environment configuration, context propagation, operation timing, exception normalization, and defensive redaction.
+Defines schema versioning, formatters, environment configuration, context propagation, timing, exception normalization, and defensive redaction.
 
 ### `raw.py`
 
-Preserves exact source bytes, derives SHA-256 content paths, creates receipt manifests, publishes atomically, and verifies integrity.
+Preserves exact source bytes, creates content-addressed objects and receipt manifests, and verifies integrity.
 
 ### `contract.py`
 
-Loads TOML contracts, validates contract definitions, calculates contract hashes, and executes structural, categorical, temporal, type, unit, and range rules.
+Loads TOML contracts and executes structural, categorical, temporal, type, unit, and range rules.
 
 ### `execution.py`
 
-Defines lifecycle states, permitted transitions, execution events, canonical event hashing, local JSONL journals, and chain validation.
+Defines lifecycle states, permitted transitions, canonical event hashing, local JSONL journals, and chain validation.
 
 ### `pipeline.py`
 
-Orchestrates raw capture, contract validation, quality outputs, local execution events, and stage-level structured logs. A successful pipeline result is `validated`, not yet `completed`.
+Orchestrates raw capture, contract validation, quality outputs, local execution events, and structured logs. Success means `validated`, not yet `completed`.
 
 ### `run_audit.py`
 
-Registers validated runs, imports local events, acquires loading attempts, records completion or failure, supports retries, and validates durable event chains.
+Registers validated runs, imports local events, acquires attempts, records completion or failure, supports retries, and validates durable chains.
 
 ### `registry.py`
 
-Maps each dataset to typed row conversion and PostgreSQL persistence SQL. It does not resolve terminology or manage execution state.
+Maps datasets to typed conversion and persistence SQL. It is independent of the source adapter.
 
 ### `migration.py`
 
-Discovers V001–V008, checks immutable migration hashes, detects complete schema signatures, serializes execution with an advisory lock, and applies pending versions transactionally.
+Discovers V001–V008, verifies migration history, detects schema signatures, locks execution, and applies pending versions transactionally.
 
 ### `terminology.py`
 
-Provides typed inspection, source-code resolution, and whole-database terminology-binding validation.
-
-### `history.py`
-
-Declares patient SCD Type 2 and immutable-event policies.
+Provides terminology inspection, resolution, and binding validation.
 
 ### `database.py`
 
-Verifies outputs, contract lineage, raw lineage, and the local execution journal. It coordinates the separate audit and clinical transactions and emits preflight, attempt, transaction, idempotency, and failure-audit logs.
+Verifies outputs and lineage, then coordinates audit and clinical transactions.
 
 ### `cohort.py`
 
-Builds versioned analytical cohorts, records source-run lineage, and logs source resolution, database build, and export durations without row values.
-
-### `demo.py`
-
-Correlates the six validation runs, migration, persistence operations, and cohort build under one demonstration invocation.
+Builds versioned analytical cohorts and records source-run lineage.
 
 ## Enforcement boundaries
+
+### Generation boundary
+
+Controls profile completeness, tag and commit identity, clean checkout, Java requirement, command inputs, exact source headers, and source fingerprints.
+
+### Adapter boundary
+
+Controls deterministic transformation, parent relationships, supported subsets, stable event identities, explicit omissions, terminology candidates, output contracts, and output fingerprints.
 
 ### Raw boundary
 
@@ -301,34 +327,44 @@ Controls exact bytes and receipt integrity.
 
 ### Contract boundary
 
-Controls intrinsic row validity: columns, required values, types, declared vocabularies, temporal order, units, and ranges.
+Controls intrinsic row validity: columns, required values, types, vocabularies, temporal order, units, and ranges.
 
 ### Execution boundary
 
-Controls lifecycle transitions, attempt ownership, timestamps, failure metadata, event hashes, and agreement between event history and current state.
+Controls lifecycle transitions, attempts, timestamps, failure metadata, hashes, and agreement between history and current state.
 
 ### Observability boundary
 
-Controls log schema, contextual fields, severity, operation timing, sanitization, and separation between stderr telemetry and stdout results. It does not establish durability.
+Controls log schema, contextual fields, severity, timing, sanitization, and stderr/stdout separation. It does not establish durability.
 
 ### Terminology boundary
 
-Controls registered source aliases, installed concepts, active normalized targets, and clinical domain.
+Controls source aliases, installed concepts, active targets, and clinical domain.
 
 ### PostgreSQL boundary
 
-Controls foreign keys, constraints, terminology references, record hashes, SCD2 transitions, immutable-event conflicts, and transaction rollback.
-
-A contract-valid row may still fail PostgreSQL because a parent is missing, a code is unknown, a domain is wrong, or an immutable identity conflicts. That failure rolls back clinical changes, remains in the execution audit, and emits sanitized operational telemetry.
+Controls foreign keys, constraints, terminology references, record hashes, SCD2 transitions, immutable conflicts, and transaction rollback.
 
 ## Identity and lineage model
 
 ```text
+profile SHA-256
+    → exact Synthea generation controls
+
+upstream commit
+    → exact generator source identity
+
+generation dataset fingerprint
+    → exact upstream CSV set
+
+adaptation fingerprint
+    → exact adapter inputs, outputs, and omission policy
+
 correlation UUID
-    → one observable invocation context
+    → one observable invocation
 
 raw object SHA-256
-    → exact source bytes
+    → exact ingested source bytes
 
 raw receipt UUID + SHA-256
     → one reception event
@@ -339,26 +375,17 @@ contract path + version + SHA-256
 run UUID
     → one logical execution across retries
 
-local journal head SHA-256
-    → validated pre-database event prefix
-
-audit head SHA-256
-    → complete durable event timeline
-
-attempt number
-    → one loading try within the run
+record_sha256
+    → normalized clinical business content
 
 normalized_concept_id
     → installed normalized concept
-
-record_sha256
-    → normalized clinical business content
 
 cohort run UUID
     → one analytical derivation
 ```
 
-These identifiers remain deliberately separate. Only the audit and lineage identifiers are persisted as authoritative evidence; the correlation identifier belongs to observability.
+These identifiers remain deliberately separate.
 
 ## Migration sequence
 
@@ -373,46 +400,34 @@ V007 minimal clinical terminology integration
 V008 complete execution lifecycle and failure audit
 ```
 
-Applied migrations are not edited. Corrections require a new forward migration. Structured logging does not require V009 because it does not alter persistent database state.
+Synthea and logging do not require V009 because they do not alter persistent database structure.
 
 ## Design trade-offs
 
-### Failure evidence outside the clinical transaction
+### Full generation outside normal CI
 
-The run must exist before clinical inserts begin. Otherwise the same rollback that protects clinical atomicity would erase the failure record.
+The standard CI validates profile packaging, schema pinning, deterministic adaptation, manifests, terminology import, and PostgreSQL loading with a small fixture. It does not clone and run the Java generator on every pull request, avoiding network and Gradle dependence in the fast test path.
 
-### Local journal before database registration
+### Single thread over generation speed
 
-Validation-stage failures need evidence even when PostgreSQL is unavailable or the run has not yet been trusted for registration.
+A single generator thread prioritizes stable ordering and identifiers over throughput. Benchmark generation may later use a separate performance profile with weaker byte-level reproducibility claims.
+
+### Explicit omission over broad coercion
+
+The adapter reports unsupported observations and other excluded rows. It does not invent mappings to make every upstream record fit a narrow contract.
+
+### Unverified terminology over false confidence
+
+Unknown Synthea concepts are retained as `unverified` rather than rejected solely because the local catalog is small or described as verified without evidence.
 
 ### Logging is not auditing
 
-Logs favor diagnostic detail and external aggregation. Audit records favor durable state consistency. Combining them would either make logs too rigid or make the audit dependent on an optional transport.
+Logs support diagnosis and aggregation. Audit records enforce durable state consistency. Combining them would make the audit dependent on optional log transport.
 
-### Context propagation without domain parameters
+### Hashes expose, not prevent, modification
 
-`contextvars` avoids passing correlation metadata through every function. The trade-off is that context must be established at instrumented boundaries and tested for correct restoration.
-
-### Data minimization before redaction
-
-Known fields and text patterns are sanitized, but arbitrary secrets cannot be identified perfectly. Therefore logging calls use aggregates and technical metadata rather than clinical values.
-
-### JSON by default
-
-JSON integrates directly with container and log-processing systems. A text formatter remains available for local reading, while stdout stays reserved for command results.
-
-### Hash chains are tamper-evident, not tamper-proof
-
-They expose unauthorized changes unless an actor rewrites the complete chain and all references. They do not replace restricted access or WORM storage.
-
-### One run, multiple attempts
-
-Retrying does not create a new logical validation identity. The attempt counter and event timeline preserve every loading try under the same verified outputs.
-
-### Honest legacy gaps
-
-V008 labels pre-existing runs with `audit_gap_reason` rather than inventing historical events.
+Manifests and event chains are tamper-evident. They do not replace access control or WORM storage.
 
 ## Current limitations
 
-The platform does not yet implement centralized log transport, OpenTelemetry traces, metrics, dashboards, alerting, automatic log rotation, scheduler heartbeats, stale-run recovery, terminology release importers, UCUM normalization, Synthea generation, bulk `COPY`, performance benchmarks, a second cohort, production security controls, or PHI handling.
+The platform does not yet implement bulk PostgreSQL `COPY`, performance benchmarks on large Synthea populations, centralized log transport, OpenTelemetry, metrics, dashboards, scheduler recovery, complete terminology importers, UCUM normalization, a second cohort, production security controls, PHI handling, or epidemiological validity claims.

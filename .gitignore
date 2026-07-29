@@ -13,5 +13,6 @@ dist/
 .env
 data/processed/
 data/analytics/
+data/synthea/
 .DS_Store
 Thumbs.db
