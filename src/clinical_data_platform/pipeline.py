@@ -8,7 +8,7 @@ import json
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from clinical_data_platform.ingestion import read_csv_records
@@ -80,7 +80,7 @@ def run_patient_validation(
     rule_counts = Counter(error.rule for error in result.errors)
     quality_report: dict[str, object] = {
         "dataset": "patients",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "input_path": str(input_path),
         "input_sha256": _sha256(input_path),
         "reference_date": effective_reference_date.isoformat(),
