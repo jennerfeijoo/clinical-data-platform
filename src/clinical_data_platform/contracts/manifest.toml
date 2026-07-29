@@ -1,0 +1,7 @@
+schema_version = "1.0.0"
+
+[contracts]
+patients = "patients/v1.0.0.toml"
+encounters = "encounters/v1.0.0.toml"
+diagnoses = "diagnoses/v1.0.0.toml"
+observations = "observations/v1.0.0.toml"
