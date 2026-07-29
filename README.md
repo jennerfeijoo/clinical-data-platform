@@ -1,6 +1,6 @@
 # Clinical Data Platform
 
-> Status: active development toward `1.0.0` — the validation and persistence architecture is now dataset-generic.
+> Status: active development toward `1.0.0` — version `0.4.0` introduces executable, versioned dataset contracts.
 
 Clinical Data Platform is a synthetic clinical data engineering project that demonstrates the path from raw healthcare-like records to an auditable analysis-ready dataset.
 
@@ -8,54 +8,87 @@ The repository uses only synthetic data. It is intended for engineering review a
 
 ## Current architectural milestone
 
-The original implementation had one pipeline for patients and a second pipeline for encounters, diagnoses, and observations. That duplication has been removed.
-
-All datasets now use the same two operations:
-
-```python
-run_dataset_validation(...)
-persist_dataset_validation_outputs(...)
-```
-
-Dataset-specific behavior is registered through `DatasetDefinition` objects.
+The platform now separates three concerns explicitly:
 
 ```text
-Dataset registry
-    ├── patients
-    ├── encounters
-    ├── diagnoses
-    └── observations
-          │
-          ▼
+Versioned data contract
+        │
+        ├── columns and order
+        ├── required values
+        ├── primary key and uniqueness
+        ├── types and categories
+        ├── temporal rules
+        └── measurement profiles
+        │
+        ▼
 Generic validation pipeline
-          │
-          ▼
-Generic PostgreSQL persistence
+        │
+        ▼
+Registry-controlled persistence
 ```
 
-There is no patient-specific pipeline or persistence path.
+The contracts are TOML resources packaged with the application:
 
-## What the project does
+```text
+src/clinical_data_platform/contracts/
+├── manifest.toml
+├── patients/v1.0.0.toml
+├── encounters/v1.0.0.toml
+├── diagnoses/v1.0.0.toml
+└── observations/v1.0.0.toml
+```
+
+`manifest.toml` selects the active version for every dataset. Historical contract files remain available for reproducibility.
+
+## Why the contracts are executable
+
+The pipeline does not merely display the contracts. It uses them to determine whether each row is valid.
+
+The contract engine currently executes:
+
+- required and unexpected-column rules;
+- required-value and uniqueness rules;
+- string, date, timezone-aware datetime, and finite-number types;
+- categorical vocabularies;
+- dates that must not be in the future;
+- temporal ordering between fields;
+- conditional measurement units and plausible ranges.
+
+Each validation run records:
+
+```text
+source_path
+source_sha256
+contract_path
+contract_version
+contract_sha256
+reference_date
+run_id
+```
+
+The loader recalculates the contract hash before writing to PostgreSQL. A quality report with inconsistent contract lineage is rejected.
+
+## Data flow
 
 ```text
 Synthetic CSV files
         │
         ▼
-Dataset registry lookup
+Active contract selected by manifest
         │
         ▼
-Schema and clinical validation
+Executable contract validation
         │
         ├── valid rows
         ├── quarantined rows
         ├── normalized errors
-        └── quality reports
+        └── quality report + source/contract lineage
         │
         ▼
 Transactional PostgreSQL loading
         │
         ├── normalized clinical tables
-        └── persistent run lineage
+        └── audit.pipeline_runs
         │
         ▼
 Versioned hypertension cohort SQL
@@ -66,49 +99,46 @@ Analysis-ready feature table + metadata
 
 ## Implemented capabilities
 
-- generic dataset registry;
-- one validation pipeline for all registered datasets;
-- one persistence workflow for all registered datasets;
+- active contract manifest;
+- immutable versioned contract resources;
+- contract-definition validation;
+- executable structural, categorical, temporal, and measurement rules;
+- generic validation pipeline for all datasets;
+- generic persistence workflow for all datasets;
 - normalized cross-dataset validation errors;
 - synthetic patients, encounters, diagnoses, and observations;
-- documented data contracts;
-- UTF-8 CSV ingestion;
-- required-field and uniqueness checks;
-- categorical and vocabulary validation;
-- ISO date and timezone-aware datetime validation;
-- temporal-consistency rules;
-- measurement-unit and clinical-plausibility rules;
 - rejected-record quarantine outputs;
-- structured validation errors;
-- run UUIDs and source SHA-256 checksums;
-- normalized PostgreSQL clinical, audit, and analytics schemas;
+- run UUIDs and SHA-256 checksums for source and contract files;
+- PostgreSQL persistence of contract lineage;
 - transactional, idempotent loading;
 - referential-integrity enforcement;
-- persistent pipeline and cohort lineage;
 - version-controlled hypertension cohort construction;
 - baseline feature generation and CSV export;
 - Docker and Docker Compose execution;
 - PowerShell and POSIX demo scripts;
 - Ruff, mypy, pytest, coverage, PostgreSQL integration tests, and GitHub Actions.
 
-## Generic dataset definition
+## Contract inspection commands
 
-Every supported dataset is represented by a `DatasetDefinition`:
+List active versions:
 
-```python
-DatasetDefinition(
-    name="patients",
-    columns=(...),
-    id_column="patient_id",
-    validator=...,
-    row_builder=...,
-    upsert_sql=...,
-)
+```powershell
+clinical-data list-contracts
 ```
 
-The generic pipeline does not know patient-specific columns or clinical rules. It retrieves that behavior from the registry.
+Show one parsed contract:
 
-The extension test in `tests/test_registry.py` registers a temporary `labs` dataset and runs it through the existing pipeline without modifying `pipeline.py`.
+```powershell
+clinical-data show-contract observations
+```
+
+Validate every active definition:
+
+```powershell
+clinical-data validate-contracts
+```
+
+Example output from `list-contracts` includes dataset, version, SHA-256, and resource path.
 
 ## Fastest way to run the complete workflow
 
@@ -136,7 +166,7 @@ POSIX shell:
 sh scripts/run_demo.sh
 ```
 
-The scripts start PostgreSQL, build the application image, run the complete workflow, and write generated files under:
+The scripts start PostgreSQL, build the application image, validate and persist all datasets, construct the cohort, and write generated files under:
 
 ```text
 data/processed/
@@ -151,12 +181,12 @@ docker compose down -v
 
 ## Expected bundled-sample result
 
-| Dataset | Received | Valid | Invalid | Errors |
-|---|---:|---:|---:|---:|
-| Patients | 8 | 5 | 3 | 3 |
-| Encounters | 8 | 7 | 1 | 1 |
-| Diagnoses | 7 | 6 | 1 | 2 |
-| Observations | 14 | 13 | 1 | 1 |
+| Dataset | Received | Valid | Invalid | Errors | Contract |
+|---|---:|---:|---:|---:|---:|
+| Patients | 8 | 5 | 3 | 3 | 1.0.0 |
+| Encounters | 8 | 7 | 1 | 1 | 1.0.0 |
+| Diagnoses | 7 | 6 | 1 | 2 | 1.0.0 |
+| Observations | 14 | 13 | 1 | 1 | 1.0.0 |
 
 The default hypertension cohort contains two patients:
 
@@ -178,6 +208,16 @@ validation_errors.csv
 quality_report.json
 ```
 
+The quality report includes contract lineage:
+
+```json
+{
+  "contract_path": "patients/v1.0.0.toml",
+  "contract_version": "1.0.0",
+  "contract_sha256": "..."
+}
+```
+
 The analytical stage produces:
 
 ```text
@@ -187,8 +227,6 @@ data/analytics/
 ```
 
 ## Local Python development
-
-Create and activate a virtual environment:
 
 ```powershell
 python -m venv .venv
@@ -213,13 +251,16 @@ clinical-data run-demo --repository-root .
 ## Main CLI commands
 
 ```text
+clinical-data list-contracts
+clinical-data show-contract
+clinical-data validate-contracts
 clinical-data validate-dataset
 clinical-data load-dataset
 clinical-data build-hypertension-cohort
 clinical-data run-demo
 ```
 
-Validate patients through the generic command:
+Validate patients:
 
 ```powershell
 clinical-data validate-dataset patients data/sample/patients.csv `
@@ -227,15 +268,7 @@ clinical-data validate-dataset patients data/sample/patients.csv `
   --reference-date 2026-07-29
 ```
 
-Validate observations through the same command:
-
-```powershell
-clinical-data validate-dataset observations data/sample/observations.csv `
-  --output-dir data/processed/observations `
-  --reference-date 2026-07-29
-```
-
-Load any validated dataset:
+Load validated patients:
 
 ```powershell
 clinical-data load-dataset patients `
@@ -252,7 +285,7 @@ python -m pytest --cov=clinical_data_platform --cov-report=term-missing
 docker build --tag clinical-data-platform:local .
 ```
 
-Integration tests use PostgreSQL and are executed automatically in GitHub Actions.
+Integration tests use PostgreSQL and run automatically in GitHub Actions.
 
 ## Repository structure
 
@@ -265,21 +298,21 @@ clinical-data-platform/
 │   ├── analysis-guide.md
 │   ├── database.md
 │   ├── hypertension-cohort.md
-│   ├── learning/
-│   │   └── generic-dataset-architecture-es.md
-│   └── data-contracts/
+│   └── learning/
+│       ├── generic-dataset-architecture-es.md
+│       └── versioned-executable-contracts-es.md
 ├── scripts/
 ├── sql/
 ├── src/clinical_data_platform/
-│   ├── clinical_entities.py
+│   ├── contracts/
 │   ├── cohort.py
+│   ├── contract.py
 │   ├── database.py
 │   ├── demo.py
 │   ├── ingestion.py
 │   ├── models.py
 │   ├── pipeline.py
-│   ├── registry.py
-│   └── validation.py
+│   └── registry.py
 ├── tests/
 ├── Dockerfile
 ├── docker-compose.yml
@@ -289,26 +322,38 @@ clinical-data-platform/
 
 ## Documentation
 
-- [`docs/architecture.md`](docs/architecture.md): generic system architecture and design trade-offs;
-- [`docs/learning/generic-dataset-architecture-es.md`](docs/learning/generic-dataset-architecture-es.md): Spanish study guide, interview explanations, and exercises;
+- [`docs/architecture.md`](docs/architecture.md): system architecture and boundaries;
+- [`docs/learning/generic-dataset-architecture-es.md`](docs/learning/generic-dataset-architecture-es.md): generic registry architecture;
+- [`docs/learning/versioned-executable-contracts-es.md`](docs/learning/versioned-executable-contracts-es.md): detailed Spanish guide to contract execution and versioning;
 - [`docs/analysis-guide.md`](docs/analysis-guide.md): technical review sequence and SQL queries;
-- [`docs/database.md`](docs/database.md): persistence and idempotency;
-- [`docs/hypertension-cohort.md`](docs/hypertension-cohort.md): cohort definition and variables;
-- [`docs/data-contracts/`](docs/data-contracts/): source schemas and validation rules.
+- [`docs/database.md`](docs/database.md): persistence, idempotency, and lineage;
+- [`docs/hypertension-cohort.md`](docs/hypertension-cohort.md): cohort definition and variables.
+
+## Versioning policy for contracts
+
+Published contract files are not overwritten.
+
+```text
+PATCH: non-behavioral correction
+MINOR: backward-compatible addition
+MAJOR: incompatible interface change
+```
+
+A new active version is introduced by adding a new file and updating `manifest.toml`.
 
 ## Current limitations
 
 The repository is not yet version `1.0.0`. The next architectural steps include:
 
-- declarative and versioned data contracts;
-- schema migration tooling;
+- database schema migration tooling;
 - immutable raw-data storage;
-- large-scale loading and benchmarks;
+- historical record strategy;
+- larger synthetic datasets and benchmarks;
 - expanded entities and terminology normalization;
 - stronger operational observability;
 - additional cohort definitions and attrition reporting.
 
-It also intentionally excludes identifiable patient data, production clinical decision support, enterprise authentication, and regulatory deployment claims.
+It intentionally excludes identifiable patient data, production clinical decision support, enterprise authentication, and regulatory deployment claims.
 
 ## License
 
