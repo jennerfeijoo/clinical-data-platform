@@ -113,7 +113,6 @@ def discover_migrations() -> tuple[Migration, ...]:
     discovered.sort(key=lambda migration: migration.version)
     if not discovered:
         raise MigrationDefinitionError("No packaged database migrations were found.")
-
     versions = [migration.version for migration in discovered]
     expected = list(range(1, len(discovered) + 1))
     if versions != expected:
@@ -163,6 +162,20 @@ def _column_group_presence(
     )
 
 
+def _require_complete_group(
+    presence: tuple[bool, ...],
+    *,
+    minimum_version: int,
+    current_version: int,
+    message: str,
+) -> bool:
+    if not any(presence):
+        return False
+    if not all(presence) or current_version < minimum_version:
+        raise MigrationHistoryError(message)
+    return True
+
+
 def _detect_existing_schema_version(connection: psycopg.Connection[Any]) -> int:
     """Identify the highest complete platform schema represented in the database."""
     core_tables = (
@@ -203,72 +216,70 @@ def _detect_existing_schema_version(connection: psycopg.Connection[Any]) -> int:
             )
         version = 2
 
-    contract_columns = (
-        "contract_path",
-        "contract_version",
-        "contract_sha256",
-    )
     contract_presence = _column_group_presence(
         connection,
         "audit",
         "pipeline_runs",
-        contract_columns,
+        ("contract_path", "contract_version", "contract_sha256"),
     )
-    if any(contract_presence):
-        if not all(contract_presence) or version < 2:
-            raise MigrationHistoryError(
-                "The database contains partial contract-lineage columns and cannot be baselined."
-            )
+    if _require_complete_group(
+        contract_presence,
+        minimum_version=2,
+        current_version=version,
+        message=(
+            "The database contains partial contract-lineage columns and cannot be baselined."
+        ),
+    ):
         version = 3
 
-    raw_columns = (
-        "raw_receipt_id",
-        "raw_received_at",
-        "raw_storage_version",
-        "raw_manifest_path",
-        "raw_manifest_sha256",
-        "raw_object_path",
-        "raw_size_bytes",
-    )
     raw_presence = _column_group_presence(
         connection,
         "audit",
         "pipeline_runs",
-        raw_columns,
+        (
+            "raw_receipt_id",
+            "raw_received_at",
+            "raw_storage_version",
+            "raw_manifest_path",
+            "raw_manifest_sha256",
+            "raw_object_path",
+            "raw_size_bytes",
+        ),
     )
-    if any(raw_presence):
-        if not all(raw_presence) or version < 3:
-            raise MigrationHistoryError(
-                "The database contains partial raw-lineage columns and cannot be baselined."
-            )
+    if _require_complete_group(
+        raw_presence,
+        minimum_version=3,
+        current_version=version,
+        message="The database contains partial raw-lineage columns and cannot be baselined.",
+    ):
         version = 4
 
     history_table_present = _table_exists(connection, "clinical.patient_history")
-    hash_presence = tuple(
+    history_hash_presence = tuple(
         _column_exists(connection, "clinical", table_name, "record_sha256")
         for table_name in ("patients", "encounters", "diagnoses", "observations")
     )
-    if history_table_present or any(hash_presence):
-        if not history_table_present or not all(hash_presence) or version < 4:
+    if history_table_present or any(history_hash_presence):
+        if not history_table_present or not all(history_hash_presence) or version < 4:
             raise MigrationHistoryError(
                 "The database contains a partial clinical-history schema and cannot be baselined."
             )
         version = 5
 
-    additional_entity_tables = (
+    additional_tables = (
         "clinical.medications",
         "clinical.procedures",
     )
-    additional_entity_presence = tuple(
-        _table_exists(connection, table) for table in additional_entity_tables
+    additional_presence = tuple(
+        _table_exists(connection, table) for table in additional_tables
     )
     additional_hash_presence = tuple(
         _column_exists(connection, "clinical", table_name, "record_sha256")
         for table_name in ("medications", "procedures")
     )
-    if any(additional_entity_presence) or any(additional_hash_presence):
+    if any(additional_presence) or any(additional_hash_presence):
         if (
-            not all(additional_entity_presence)
+            not all(additional_presence)
             or not all(additional_hash_presence)
             or version < 5
         ):
@@ -294,11 +305,7 @@ def _detect_existing_schema_version(connection: psycopg.Connection[Any]) -> int:
         connection,
         "terminology.normalized_clinical_codes",
     )
-    if (
-        any(terminology_presence)
-        or any(normalized_presence)
-        or normalized_view_present
-    ):
+    if any(terminology_presence) or any(normalized_presence) or normalized_view_present:
         if (
             not all(terminology_presence)
             or not all(normalized_presence)
@@ -309,6 +316,45 @@ def _detect_existing_schema_version(connection: psycopg.Connection[Any]) -> int:
                 "The database contains a partial terminology schema and cannot be baselined."
             )
         version = 7
+
+    audit_columns = _column_group_presence(
+        connection,
+        "audit",
+        "pipeline_runs",
+        (
+            "current_stage",
+            "attempt_count",
+            "started_at",
+            "validated_at",
+            "loading_started_at",
+            "completed_at",
+            "failed_at",
+            "failure_stage",
+            "failure_type",
+            "failure_message",
+            "failure_code",
+            "failure_details",
+            "local_journal_event_count",
+            "local_journal_head_sha256",
+            "audit_event_count",
+            "audit_head_sha256",
+            "audit_gap_reason",
+            "updated_at",
+        ),
+    )
+    audit_event_table = _table_exists(connection, "audit.pipeline_run_events")
+    audit_timeline_view = _table_exists(connection, "audit.pipeline_run_timeline")
+    if any(audit_columns) or audit_event_table or audit_timeline_view:
+        if (
+            not all(audit_columns)
+            or not audit_event_table
+            or not audit_timeline_view
+            or version < 7
+        ):
+            raise MigrationHistoryError(
+                "The database contains a partial execution-audit schema and cannot be baselined."
+            )
+        version = 8
 
     return version
 

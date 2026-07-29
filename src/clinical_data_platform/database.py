@@ -13,9 +13,23 @@ from uuid import UUID
 import psycopg
 
 from clinical_data_platform.contract import load_contract_by_resource
+from clinical_data_platform.execution import (
+    EXECUTION_JOURNAL_VERSION,
+    ExecutionAuditError,
+    ExecutionJournalSummary,
+    read_execution_journal,
+)
 from clinical_data_platform.ingestion import read_csv_records
 from clinical_data_platform.raw import RAW_STORAGE_VERSION, verify_raw_receipt
 from clinical_data_platform.registry import get_dataset_definition
+from clinical_data_platform.run_audit import (
+    RunAuditError,
+    RunRegistration,
+    begin_loading_attempt,
+    complete_loading_attempt,
+    fail_loading_attempt,
+    register_validated_run,
+)
 
 
 class DatabaseConfigurationError(RuntimeError):
@@ -49,6 +63,10 @@ class QualityReport(TypedDict):
     rows_valid: int
     rows_invalid: int
     validation_errors: int
+    execution_journal_version: str
+    execution_journal_path: str
+    execution_event_count: int
+    execution_journal_head_sha256: str
     status: str
 
 
@@ -60,6 +78,8 @@ class DatasetPersistenceSummary:
     dataset: str
     contract_version: str
     already_loaded: bool
+    attempt_number: int
+    final_status: str
     records_upserted: int
     validation_errors_inserted: int
 
@@ -86,7 +106,6 @@ def _read_quality_report(path: Path) -> QualityReport:
 
     with path.open(encoding="utf-8") as file:
         raw = json.load(file)
-
     if not isinstance(raw, dict):
         raise PersistenceError("The quality report must contain a JSON object.")
 
@@ -106,6 +125,9 @@ def _read_quality_report(path: Path) -> QualityReport:
         "contract_version",
         "contract_sha256",
         "reference_date",
+        "execution_journal_version",
+        "execution_journal_path",
+        "execution_journal_head_sha256",
         "status",
     )
     integer_fields = (
@@ -114,12 +136,11 @@ def _read_quality_report(path: Path) -> QualityReport:
         "rows_valid",
         "rows_invalid",
         "validation_errors",
+        "execution_event_count",
     )
-
     for field in string_fields:
         if not isinstance(raw.get(field), str) or not raw[field]:
             raise PersistenceError(f"Quality report field must be a non-empty string: {field}")
-
     for field in integer_fields:
         value = raw.get(field)
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
@@ -148,6 +169,10 @@ def _read_quality_report(path: Path) -> QualityReport:
         rows_valid=raw["rows_valid"],
         rows_invalid=raw["rows_invalid"],
         validation_errors=raw["validation_errors"],
+        execution_journal_version=raw["execution_journal_version"],
+        execution_journal_path=raw["execution_journal_path"],
+        execution_event_count=raw["execution_event_count"],
+        execution_journal_head_sha256=raw["execution_journal_head_sha256"],
         status=raw["status"],
     )
 
@@ -207,6 +232,65 @@ def _validate_raw_lineage(report: QualityReport, dataset: str, raw_root: Path) -
         raise PersistenceError("input_sha256 does not match the immutable raw object.")
 
 
+def _validate_execution_journal(
+    report: QualityReport,
+    dataset: str,
+    output_directory: Path,
+) -> ExecutionJournalSummary:
+    if report["execution_journal_version"] != EXECUTION_JOURNAL_VERSION:
+        raise PersistenceError("execution_journal_version is not supported.")
+    relative_path = Path(report["execution_journal_path"])
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise PersistenceError("execution_journal_path must remain inside the output directory.")
+    try:
+        journal = read_execution_journal(output_directory / relative_path)
+        reported_run_id = UUID(report["run_id"])
+    except (ValueError, FileNotFoundError, ExecutionAuditError) as exc:
+        raise PersistenceError("Execution journal could not be verified.") from exc
+
+    if journal.run_id != reported_run_id or journal.dataset != dataset:
+        raise PersistenceError("Execution journal identity does not match the quality report.")
+    if journal.status != "validated" or report["status"] != "validated":
+        raise PersistenceError("Only validated execution journals can be persisted.")
+    if journal.event_count != report["execution_event_count"]:
+        raise PersistenceError("execution_event_count does not match the journal.")
+    if journal.head_sha256 != report["execution_journal_head_sha256"]:
+        raise PersistenceError("execution_journal_head_sha256 does not match the journal.")
+    return journal
+
+
+def _registration(
+    report: QualityReport,
+    run_id: UUID,
+    raw_receipt_id: UUID,
+    generated_at: datetime,
+    raw_received_at: datetime,
+    reference_date: date,
+) -> RunRegistration:
+    return RunRegistration(
+        run_id=run_id,
+        dataset=report["dataset"],
+        source_path=report["input_path"],
+        source_sha256=report["input_sha256"],
+        raw_receipt_id=raw_receipt_id,
+        raw_received_at=raw_received_at,
+        raw_storage_version=report["raw_storage_version"],
+        raw_manifest_path=report["raw_manifest_path"],
+        raw_manifest_sha256=report["raw_manifest_sha256"],
+        raw_object_path=report["raw_object_path"],
+        raw_size_bytes=report["raw_size_bytes"],
+        contract_path=report["contract_path"],
+        contract_version=report["contract_version"],
+        contract_sha256=report["contract_sha256"],
+        reference_date=reference_date,
+        rows_received=report["rows_received"],
+        rows_valid=report["rows_valid"],
+        rows_invalid=report["rows_invalid"],
+        validation_errors=report["validation_errors"],
+        generated_at=generated_at,
+    )
+
+
 def persist_dataset_validation_outputs(
     connection: psycopg.Connection[Any],
     dataset: str,
@@ -214,7 +298,7 @@ def persist_dataset_validation_outputs(
     *,
     raw_root: Path,
 ) -> DatasetPersistenceSummary:
-    """Load a dataset after verifying output, contract, and raw-object lineage."""
+    """Load one verified dataset while durably auditing every loading attempt."""
     definition = get_dataset_definition(dataset)
     report = _read_quality_report(output_directory / "quality_report.json")
     valid_records = read_csv_records(output_directory / f"valid_{dataset}.csv")
@@ -226,16 +310,17 @@ def persist_dataset_validation_outputs(
         raise PersistenceError(
             f"Quality report contains {report['dataset']!r}, expected {dataset!r}."
         )
-    if report["status"] != "completed":
-        raise PersistenceError("Only completed validation runs can be persisted.")
-    if len(report["input_sha256"]) != 64:
-        raise PersistenceError("input_sha256 must contain 64 hexadecimal characters.")
-    if len(report["raw_manifest_sha256"]) != 64:
-        raise PersistenceError("raw_manifest_sha256 must contain 64 hexadecimal characters.")
-    if len(report["contract_sha256"]) != 64:
-        raise PersistenceError("contract_sha256 must contain 64 hexadecimal characters.")
+    for field in (
+        "input_sha256",
+        "raw_manifest_sha256",
+        "contract_sha256",
+        "execution_journal_head_sha256",
+    ):
+        if len(report[field]) != 64:
+            raise PersistenceError(f"{field} must contain 64 hexadecimal characters.")
     _validate_contract_lineage(report, dataset)
     _validate_raw_lineage(report, dataset, raw_root)
+    journal = _validate_execution_journal(report, dataset, output_directory)
 
     try:
         run_id = UUID(report["run_id"])
@@ -246,101 +331,102 @@ def persist_dataset_validation_outputs(
     except ValueError as exc:
         raise PersistenceError("The quality report contains an invalid UUID or date.") from exc
 
-    record_values = definition.row_builder(
-        valid_records,
-        run_id,
-        report["input_sha256"],
-    )
-    error_values = [
-        (
-            run_id,
-            int(error["row_number"]),
-            error["entity_id"] or None,
-            error["patient_id"] or None,
-            error["field"],
-            error["rule"],
-            error["message"],
-            error["value"] or None,
+    try:
+        register_validated_run(
+            connection,
+            _registration(
+                report,
+                run_id,
+                raw_receipt_id,
+                generated_at,
+                raw_received_at,
+                reference_date,
+            ),
+            journal,
         )
-        for error in validation_errors
-    ]
+        attempt = begin_loading_attempt(connection, run_id)
+    except RunAuditError as exc:
+        raise PersistenceError("Pipeline execution audit could not begin loading.") from exc
 
-    with connection.transaction():
-        inserted_run = connection.execute(
-            """
-            INSERT INTO audit.pipeline_runs (
-                run_id, dataset_name, source_path, source_sha256,
-                raw_receipt_id, raw_received_at, raw_storage_version,
-                raw_manifest_path, raw_manifest_sha256,
-                raw_object_path, raw_size_bytes,
-                contract_path, contract_version, contract_sha256,
-                reference_date, rows_received, rows_valid, rows_invalid,
-                validation_errors, status, generated_at
-            )
-            VALUES (
-                %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s
-            )
-            ON CONFLICT (run_id) DO NOTHING
-            """,
+    if attempt.already_completed:
+        return DatasetPersistenceSummary(
+            run_id=run_id,
+            dataset=dataset,
+            contract_version=report["contract_version"],
+            already_loaded=True,
+            attempt_number=attempt.attempt_number,
+            final_status="completed",
+            records_upserted=0,
+            validation_errors_inserted=0,
+        )
+
+    try:
+        record_values = definition.row_builder(
+            valid_records,
+            run_id,
+            report["input_sha256"],
+        )
+        error_values = [
             (
                 run_id,
-                dataset,
-                report["input_path"],
-                report["input_sha256"],
-                raw_receipt_id,
-                raw_received_at,
-                report["raw_storage_version"],
-                report["raw_manifest_path"],
-                report["raw_manifest_sha256"],
-                report["raw_object_path"],
-                report["raw_size_bytes"],
-                report["contract_path"],
-                report["contract_version"],
-                report["contract_sha256"],
-                reference_date,
-                report["rows_received"],
-                report["rows_valid"],
-                report["rows_invalid"],
-                report["validation_errors"],
-                report["status"],
-                generated_at,
-            ),
-        )
-
-        if inserted_run.rowcount == 0:
-            return DatasetPersistenceSummary(
-                run_id=run_id,
-                dataset=dataset,
-                contract_version=report["contract_version"],
-                already_loaded=True,
-                records_upserted=0,
-                validation_errors_inserted=0,
+                int(error["row_number"]),
+                error["entity_id"] or None,
+                error["patient_id"] or None,
+                error["field"],
+                error["rule"],
+                error["message"],
+                error["value"] or None,
             )
+            for error in validation_errors
+        ]
 
-        if record_values:
-            with connection.cursor() as cursor:
-                cursor.executemany(definition.upsert_sql, record_values)
-
-        if error_values:
-            with connection.cursor() as cursor:
-                cursor.executemany(
-                    """
-                    INSERT INTO audit.validation_errors (
-                        run_id, row_number, entity_id, patient_id,
-                        field_name, rule_name, message, rejected_value
+        with connection.transaction():
+            if record_values:
+                with connection.cursor() as cursor:
+                    cursor.executemany(definition.upsert_sql, record_values)
+            if error_values:
+                with connection.cursor() as cursor:
+                    cursor.executemany(
+                        """
+                        INSERT INTO audit.validation_errors (
+                            run_id, row_number, entity_id, patient_id,
+                            field_name, rule_name, message, rejected_value
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        error_values,
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    error_values,
-                )
+            complete_loading_attempt(
+                connection,
+                run_id,
+                attempt.attempt_number,
+                records_persisted=len(record_values),
+                validation_errors_persisted=len(error_values),
+            )
+    except Exception as exc:
+        try:
+            fail_loading_attempt(
+                connection,
+                run_id,
+                attempt.attempt_number,
+                exc,
+                details={
+                    "dataset": dataset,
+                    "records_attempted": len(valid_records),
+                    "validation_errors_attempted": len(validation_errors),
+                },
+            )
+        except Exception as audit_exc:
+            exc.add_note(f"Failure audit could not be persisted: {audit_exc}")
+        raise
 
     return DatasetPersistenceSummary(
         run_id=run_id,
         dataset=dataset,
         contract_version=report["contract_version"],
         already_loaded=False,
+        attempt_number=attempt.attempt_number,
+        final_status="completed",
         records_upserted=len(record_values),
         validation_errors_inserted=len(error_values),
     )

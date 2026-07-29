@@ -54,7 +54,10 @@ class DatasetPipelineSummary:
     rows_valid: int
     rows_invalid: int
     validation_errors: int
+    execution_event_count: int
+    execution_journal_head_sha256: str
     valid_records_path: Path
     invalid_records_path: Path
     validation_errors_path: Path
     quality_report_path: Path
+    execution_journal_path: Path

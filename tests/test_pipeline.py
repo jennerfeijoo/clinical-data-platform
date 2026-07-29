@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from clinical_data_platform.execution import read_execution_journal
 from clinical_data_platform.pipeline import run_dataset_validation
 from clinical_data_platform.raw import verify_raw_receipt
 
@@ -55,6 +56,8 @@ def test_pipeline_captures_raw_and_writes_consistent_contract_outputs(
     assert summary.rows_valid == valid
     assert summary.rows_invalid == invalid
     assert summary.validation_errors == errors
+    assert summary.execution_event_count == 4
+    assert len(summary.execution_journal_head_sha256) == 64
     assert _count_csv_rows(summary.valid_records_path) == valid
     assert _count_csv_rows(summary.invalid_records_path) == invalid
     assert _count_csv_rows(summary.validation_errors_path) == errors
@@ -63,6 +66,18 @@ def test_pipeline_captures_raw_and_writes_consistent_contract_outputs(
     assert receipt.receipt_id == summary.raw_receipt_id
     assert receipt.sha256 == summary.source_sha256
     assert receipt.object_relative_path == summary.raw_object_relative_path
+
+    journal = read_execution_journal(summary.execution_journal_path)
+    assert journal.run_id == summary.run_id
+    assert journal.status == "validated"
+    assert [event.to_status for event in journal.events] == [
+        "created",
+        "raw_captured",
+        "validating",
+        "validated",
+    ]
+    assert journal.event_count == summary.execution_event_count
+    assert journal.head_sha256 == summary.execution_journal_head_sha256
 
     report = json.loads(summary.quality_report_path.read_text(encoding="utf-8"))
     assert report["dataset"] == dataset
@@ -79,7 +94,34 @@ def test_pipeline_captures_raw_and_writes_consistent_contract_outputs(
     assert report["rows_valid"] == valid
     assert report["rows_invalid"] == invalid
     assert report["validation_errors"] == errors
+    assert report["status"] == "validated"
+    assert report["execution_journal_version"] == "1.0.0"
+    assert report["execution_event_count"] == 4
+    assert report["execution_journal_head_sha256"] == journal.head_sha256
     assert len(report["input_sha256"]) == 64
+
+
+def test_raw_capture_failure_is_preserved_in_local_execution_journal(
+    tmp_path: Path,
+) -> None:
+    output_directory = tmp_path / "processed"
+
+    with pytest.raises(FileNotFoundError):
+        run_dataset_validation(
+            "patients",
+            tmp_path / "missing.csv",
+            output_directory,
+            raw_root=tmp_path / "raw",
+            reference_date=date(2026, 7, 29),
+        )
+
+    journals = list((output_directory / "execution").glob("*.jsonl"))
+    assert len(journals) == 1
+    journal = read_execution_journal(journals[0])
+    assert journal.status == "failed"
+    assert [event.to_status for event in journal.events] == ["created", "failed"]
+    assert journal.events[-1].stage == "raw_capture"
+    assert journal.events[-1].error_type == "builtins.FileNotFoundError"
 
 
 def test_patient_rules_are_executed_from_contract(tmp_path: Path) -> None:

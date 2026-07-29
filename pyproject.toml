@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clinical-data-platform"
-version = "0.9.0"
-description = "A terminology-aware clinical data platform with executable contracts, immutable lineage, and normalized coded concepts."
+version = "0.10.0"
+description = "An auditable clinical data platform with explicit execution lifecycles, durable failures, terminology normalization, and immutable lineage."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [
     { name = "Jenner Feijoo" }
 ]
-keywords = ["clinical-data", "data-engineering", "healthcare", "postgresql", "terminology"]
+keywords = ["clinical-data", "data-engineering", "healthcare", "postgresql", "audit"]
 dependencies = [
     "psycopg[binary]>=3.2,<4"
 ]

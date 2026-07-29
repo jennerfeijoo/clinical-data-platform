@@ -15,26 +15,29 @@ Immutable raw landing zone
         └── append-only receipt
         │
         ▼
-Active contract manifest
+Versioned executable contract
         │
         ▼
-Versioned executable contract
+Hash-chained local execution journal
         │
         ▼
 Generic validation pipeline
         ├── valid rows
         ├── quarantine
         ├── normalized errors
-        └── quality report
+        └── quality report: validated
         │
         ▼
-Formal migrations V001–V007
+Formal migrations V001–V008
+        │
+        ▼
+Durable execution audit
+        ├── current-state projection
+        ├── ordered event timeline
+        └── failure retained after clinical rollback
         │
         ▼
 Terminology resolution
-        ├── source-system aliases
-        ├── active concepts by domain
-        └── local-to-normalized mappings
         │
         ▼
 Hybrid PostgreSQL persistence
@@ -56,7 +59,57 @@ patients
           └── procedures   → procedure concept
 ```
 
-The six datasets use the same raw, contract, pipeline, persistence, and audit algorithms. Dataset-specific behavior remains confined to executable contracts, row builders, SQL, migrations, and explicit history policies.
+The six datasets use the same raw, contract, execution, persistence, and audit algorithms. Dataset-specific behavior remains confined to contracts, row builders, SQL, migrations, terminology bindings, and explicit history policies.
+
+## Execution state model
+
+```text
+created
+→ raw_captured
+→ validating
+→ validated
+→ loading
+→ completed
+```
+
+Active stages may transition to `failed`. A failed loading execution may retry through `failed → loading`; `completed` is terminal.
+
+The architecture uses two audit representations:
+
+```text
+local JSONL journal
+    → exists before PostgreSQL is required
+    → covers initialization, raw capture, and validation
+
+PostgreSQL event timeline
+    → imports the verified local journal
+    → adds loading, failure, retry, and completion events
+```
+
+Both are linked by SHA-256 event chains. The quality report records the local event count and head hash. `audit.pipeline_runs` stores the current durable head, while `audit.pipeline_run_events` stores the complete ordered timeline.
+
+## Transaction topology
+
+```text
+Transaction A
+    validated run registration
+    + local journal import
+    + loading acquisition
+    → COMMIT
+
+Transaction B
+    clinical rows
+    + validation errors
+    + completed event
+    → COMMIT or ROLLBACK together
+
+Transaction C, only after B fails
+    failed event
+    + failure metadata
+    → COMMIT
+```
+
+This topology prevents partial clinical data while preserving evidence of failed attempts.
 
 ## Terminology relationship model
 
@@ -82,23 +135,31 @@ The source representation remains in the clinical table. `normalized_concept_id`
 
 ### `raw.py`
 
-Preserves exact source bytes, derives SHA-256 content paths, creates receipt manifests, publishes atomically, prevents application-level replacement, and verifies integrity.
+Preserves exact source bytes, derives SHA-256 content paths, creates receipt manifests, publishes atomically, and verifies integrity.
 
 ### `contract.py`
 
-Loads TOML contracts, validates contract definitions, calculates contract hashes, and executes structural, categorical, temporal, type, unit, and plausible-range rules.
+Loads TOML contracts, validates contract definitions, calculates contract hashes, and executes structural, categorical, temporal, type, unit, and range rules.
+
+### `execution.py`
+
+Defines lifecycle states, permitted transitions, execution events, canonical event hashing, local JSONL journals, and chain validation.
 
 ### `pipeline.py`
 
-Orchestrates raw capture, parsing of the captured object, contract validation, and generation of quality outputs. It contains no dataset-specific validation path.
+Orchestrates raw capture, contract validation, quality outputs, and local execution events. A successful pipeline result is `validated`, not yet `completed`.
+
+### `run_audit.py`
+
+Registers validated runs, imports local events, acquires loading attempts, records completion or failure, supports retries, and validates durable event chains.
 
 ### `registry.py`
 
-Maps each dataset to typed row conversion and PostgreSQL persistence SQL. It does not resolve terminology itself.
+Maps each dataset to typed row conversion and PostgreSQL persistence SQL. It does not resolve terminology or manage execution state.
 
 ### `migration.py`
 
-Discovers V001–V007, checks immutable migration hashes, detects complete schema signatures, serializes execution with an advisory lock, and applies pending versions transactionally.
+Discovers V001–V008, checks immutable migration hashes, detects complete schema signatures, serializes execution with an advisory lock, and applies pending versions transactionally.
 
 ### `terminology.py`
 
@@ -106,14 +167,11 @@ Provides typed inspection, source-code resolution, and whole-database terminolog
 
 ### `history.py`
 
-Declares persistence semantics:
-
-- patients: `scd2_snapshot`;
-- encounters, diagnoses, observations, medications, procedures: `immutable_event`.
+Declares patient SCD Type 2 and immutable-event policies.
 
 ### `database.py`
 
-Verifies processed outputs, contract lineage, raw receipt/object lineage, and persists one complete run transactionally. PostgreSQL triggers resolve terminology and enforce event semantics during that transaction.
+Verifies outputs, contract lineage, raw lineage, and the local execution journal. It coordinates the separate audit and clinical transactions.
 
 ### `cohort.py`
 
@@ -123,26 +181,25 @@ Builds versioned analytical cohorts and records source-run lineage.
 
 ### Raw boundary
 
-Controls exact bytes and receipt-event integrity.
+Controls exact bytes and receipt integrity.
 
 ### Contract boundary
 
-Controls intrinsic row validity: expected columns, required values, types, declared vocabularies, temporal order, units, and ranges.
+Controls intrinsic row validity: columns, required values, types, declared vocabularies, temporal order, units, and ranges.
+
+### Execution boundary
+
+Controls lifecycle transitions, attempt ownership, timestamps, failure metadata, event hashes, and agreement between event history and current state.
 
 ### Terminology boundary
 
-Controls whether a coded value has:
-
-- a registered source-system alias;
-- an installed concept;
-- an active normalized target;
-- the expected clinical domain.
+Controls registered source aliases, installed concepts, active normalized targets, and clinical domain.
 
 ### PostgreSQL boundary
 
-Controls foreign keys, constraints, normalized-concept references, record hashes, SCD2 transitions, event immutability, and transaction rollback.
+Controls foreign keys, constraints, terminology references, record hashes, SCD2 transitions, immutable-event conflicts, and transaction rollback.
 
-A contract-valid row may still fail PostgreSQL because its parent is missing, its code is unknown, its domain is wrong, or its immutable identity conflicts with existing content.
+A contract-valid row may still fail PostgreSQL because a parent is missing, a code is unknown, a domain is wrong, or an immutable identity conflicts. That failure rolls back clinical changes but remains in the execution audit.
 
 ## Identity and lineage model
 
@@ -157,10 +214,16 @@ contract path + version + SHA-256
     → exact validation rules
 
 run UUID
-    → one pipeline execution
+    → one logical execution across retries
 
-source system + source code
-    → original coded representation
+local journal head SHA-256
+    → validated pre-database event prefix
+
+audit head SHA-256
+    → complete durable event timeline
+
+attempt number
+    → one loading try within the run
 
 normalized_concept_id
     → installed normalized concept
@@ -184,47 +247,33 @@ V004 raw lineage
 V005 patient SCD2 and immutable-event policy
 V006 medications and procedures
 V007 minimal clinical terminology integration
+V008 complete execution lifecycle and failure audit
 ```
 
 Applied migrations are not edited. Corrections require a new forward migration.
 
-## Terminology design trade-offs
+## Design trade-offs
 
-### Preserve source codes
+### Failure evidence outside the clinical transaction
 
-Normalization adds a foreign key rather than replacing source fields. This preserves source fidelity and permits later remapping.
+The run must exist before clinical inserts begin. Otherwise the same rollback that protects clinical atomicity would erase the failure record.
 
-### Strict post-V007 membership
+### Local journal before database registration
 
-New coded rows must exist in the installed subset. This prevents silent acceptance of unknown semantics.
+Validation-stage failures need evidence even when PostgreSQL is unavailable or the run has not yet been trusted for registration.
 
-### Compatible V006 upgrade
+### Hash chains are tamper-evident, not tamper-proof
 
-Previously accepted codes absent from the seed are imported as `unverified`. Upgrade compatibility is preserved without claiming external validation.
+They expose unauthorized changes unless an actor rewrites the complete chain and all references. They do not replace restricted access or WORM storage.
 
-### Database triggers
+### One run, multiple attempts
 
-Resolution is enforced for every writer. The trade-off is PostgreSQL-specific behavior that requires migration and integration tests.
+Retrying does not create a new logical validation identity. The attempt counter and event timeline preserve every loading try under the same verified outputs.
 
-### Small subset rather than copied releases
+### Honest legacy gaps
 
-The repository includes only the concepts required by synthetic samples. Complete terminology lifecycle management remains outside this milestone.
-
-## Extension rules
-
-Adding a coded clinical field requires:
-
-1. source contract declaration;
-2. registered source-system alias;
-3. concept subset entry or explicit mapping;
-4. clinical-domain assignment;
-5. persistence binding and foreign key;
-6. unknown-code and wrong-domain tests;
-7. licensing and version metadata;
-8. documentation.
-
-A new mapping must not be introduced as an undocumented string replacement in application code.
+V008 labels pre-existing runs with `audit_gap_reason` rather than inventing historical events.
 
 ## Current limitations
 
-The platform does not yet implement complete execution-state auditing, structured logging, terminology release importers, upstream synchronization, hierarchy traversal, UCUM normalization, FHIR terminology operations, Synthea generation, bulk `COPY`, performance benchmarks, a second cohort, production security controls, or PHI handling.
+The platform does not yet implement structured application logging, external log transport, distributed tracing, scheduler heartbeats, stale-run recovery, terminology release importers, UCUM normalization, Synthea generation, bulk `COPY`, performance benchmarks, a second cohort, production security controls, or PHI handling.
