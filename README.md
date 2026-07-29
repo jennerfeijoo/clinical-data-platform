@@ -1,20 +1,24 @@
 # Clinical Data Platform
 
-> Status: active development toward `1.0.0` — version `0.11.0` adds structured application logging and correlated operation timing.
+> Status: active development toward `1.0.0` — version `0.12.0` adds a reproducible Synthea generation and adaptation workflow.
 
 Clinical Data Platform is a synthetic clinical data engineering project that demonstrates how healthcare-like source files become auditable, analysis-ready, terminology-linked datasets.
 
-The repository uses only synthetic data. It is intended for engineering review and learning, not for identifiable patient data, clinical decisions, or production healthcare deployment.
+The repository uses only synthetic data. It is intended for engineering review and learning, not for identifiable patient data, clinical decisions, epidemiological inference, or production healthcare deployment.
 
 ## Architecture
 
 ```text
+Pinned Synthea profile or external CSV source
+            │
+            ├── upstream release, commit, seeds, date, geography
+            ├── source schema and SHA-256 manifest
+            └── deterministic six-entity adapter
+            │
+            ▼
 CLI command
     ├── structured JSON logs to stderr
     └── correlation_id propagated through the workflow
-            │
-            ▼
-External CSV source
             │
             ▼
 Immutable raw capture
@@ -50,7 +54,77 @@ Terminology resolution and clinical persistence
 Versioned cohort SQL and feature export
 ```
 
-There is no patient-specific validation pipeline and no monolithic schema installer.
+There is no patient-specific pipeline, no Synthea-specific persistence path, and no monolithic schema installer.
+
+## Reproducible Synthea dataset
+
+The packaged profile is:
+
+```text
+src/clinical_data_platform/synthea_profiles/reproducible_small.toml
+```
+
+It pins:
+
+| Control | Value |
+|---|---|
+| Synthea release | `v4.0.0` |
+| population | 100 |
+| random seed | 20260729 |
+| clinician seed | 20260730 |
+| reference date | 2026-07-29 |
+| geography | Massachusetts |
+| threads | 1 |
+| retained history | complete |
+| export | six CSV files |
+
+Generation records the resolved upstream commit, Java version, normalized command, exact headers, row counts, byte sizes, per-file SHA-256 values, and a dataset fingerprint.
+
+The adapter converts:
+
+```text
+Synthea patients.csv      → patients.csv
+Synthea encounters.csv    → encounters.csv
+Synthea conditions.csv    → diagnoses.csv
+Synthea observations.csv  → observations.csv
+Synthea medications.csv   → medications.csv
+Synthea procedures.csv    → procedures.csv
+```
+
+It also creates `terminology.csv` and `synthea-adaptation-manifest.json`. Missing source-event identifiers are generated deterministically with UUIDv5. Parent relationships, exact source headers, output contracts, omitted-row counts, terminology concepts, hashes, and fingerprints are verified.
+
+The current observation adapter deliberately retains only:
+
+| LOINC source | Internal code |
+|---|---|
+| 8480-6 | `SYSTOLIC_BP` |
+| 8462-4 | `DIASTOLIC_BP` |
+| 8867-4 | `HEART_RATE` |
+
+Other observations are counted as outside the supported subset rather than silently coerced.
+
+Inspect the profile:
+
+```powershell
+clinical-data synthea-profile
+```
+
+Generate and adapt:
+
+```powershell
+.\scripts\generate_synthea.ps1
+```
+
+Load the adapted population through the existing platform controls:
+
+```powershell
+clinical-data synthea-load `
+  data/synthea/synthea-us-small-v1/normalized `
+  --processed-root data/processed/synthea `
+  --raw-root data/raw
+```
+
+See [`docs/synthea.md`](docs/synthea.md).
 
 ## Structured application logging
 
@@ -68,13 +142,8 @@ The console entrypoint emits operational telemetry to `stderr`. JSON is the defa
   "run_id": "6aa89516-f724-4dc9-b259-510abc11075a",
   "dataset": "patients",
   "operation": "validate_records_against_contract",
-  "stage": "validation",
   "outcome": "success",
-  "duration_ms": 4,
-  "rows_received": 8,
-  "rows_valid": 5,
-  "rows_invalid": 3,
-  "validation_errors": 3
+  "duration_ms": 4
 }
 ```
 
@@ -85,41 +154,13 @@ CLINICAL_DATA_LOG_LEVEL  = DEBUG | INFO | WARNING | ERROR | CRITICAL
 CLINICAL_DATA_LOG_FORMAT = json | text
 ```
 
-Defaults:
+Logs record operations, stages, outcomes, durations, aggregate counts, exception types, and SQLSTATE codes. Defensive sanitization removes clinical identifiers, rejected values, credentials, database URLs, PostgreSQL key values, and DETAIL lines.
 
-```text
-level  = INFO
-format = json
-output = stderr
-```
-
-PowerShell:
-
-```powershell
-$env:CLINICAL_DATA_LOG_LEVEL = "INFO"
-$env:CLINICAL_DATA_LOG_FORMAT = "json"
-clinical-data run-demo --repository-root . 2> data/clinical-data.jsonl
-```
-
-The logger records operation names, stages, outcomes, durations, aggregate counts, exception types, and PostgreSQL SQLSTATE codes. It does not intentionally log clinical rows.
-
-Defensive sanitization redacts:
-
-```text
-clinical identifiers
-rejected values and records
-credentials and tokens
-database URLs
-PostgreSQL key values and DETAIL lines
-```
-
-Structured logs are not the durable audit. They can be lost when `stderr` is not collected. `audit.pipeline_runs` and `audit.pipeline_run_events` remain authoritative for execution state and loading attempts.
+Structured logs are not the durable audit. `audit.pipeline_runs` and `audit.pipeline_run_events` remain authoritative for execution state and loading attempts.
 
 See [`docs/structured-logging.md`](docs/structured-logging.md).
 
 ## Complete execution lifecycle
-
-A normal run follows:
 
 ```text
 created
@@ -130,68 +171,28 @@ created
 → completed
 ```
 
-A failed load remains auditable:
+A failed loading attempt remains auditable and can retry:
 
 ```text
 validated
 → loading       attempt 1
 → failed        attempt 1
-```
-
-After the external problem is corrected, the same validated run can continue:
-
-```text
-failed
 → loading       attempt 2
 → completed     attempt 2
 ```
 
-`completed` is terminal. Unsupported transitions are rejected by PostgreSQL.
-
-### Why failures survive rollback
-
 Loading uses separate transaction boundaries:
 
-1. the validated run, imported local journal, and `loading` transition are committed;
-2. clinical rows, validation errors, and `completed` are committed atomically;
-3. when step 2 fails, clinical writes roll back and a new transaction stores `failed` with its stage, exception type, message, SQLSTATE, details, and attempt number.
+1. validated run registration, journal import, and loading acquisition commit;
+2. clinical rows, validation errors, and completed commit atomically;
+3. after a clinical rollback, failed is stored in a new transaction.
 
-This preserves both requirements:
+This preserves both:
 
 ```text
 no partial clinical data
-+ durable evidence of the failed attempt
++ durable evidence of failed attempts
 ```
-
-### Local and durable journals
-
-Validation writes:
-
-```text
-data/processed/<dataset>/execution/<run-id>.jsonl
-```
-
-Each event contains its own SHA-256 and the previous event SHA-256. Before loading, the platform verifies identities, sequence, state transitions, hashes, and chain continuity.
-
-PostgreSQL stores the imported and loading-stage timeline in:
-
-```text
-audit.pipeline_run_events
-```
-
-The current projection is stored in:
-
-```text
-audit.pipeline_runs
-```
-
-Runs created before V008 receive an explicit evidence gap:
-
-```text
-audit_gap_reason = pre_v008_execution_history_unavailable
-```
-
-No historical events are fabricated.
 
 See [`docs/execution-audit.md`](docs/execution-audit.md).
 
@@ -215,11 +216,11 @@ patients
 | medications | immutable event + terminology binding | `medication_id` |
 | procedures | immutable event + terminology binding | `procedure_id` |
 
-Every event references a patient and encounter. Exact event duplicates preserve the original row and lineage. Reusing an event identifier with different business content rolls back the clinical transaction and leaves a failed execution timeline.
+Every event references a patient and encounter. Exact duplicates preserve the original row and lineage. Conflicting identifier reuse rolls back the clinical transaction and leaves a failed execution timeline.
 
 ## Minimal terminology layer
 
-V007 creates:
+V007 provides:
 
 ```text
 terminology.code_systems
@@ -229,29 +230,11 @@ terminology.concept_mappings
 terminology.normalized_clinical_codes
 ```
 
-The installed subset registers ICD-10-CM, LOINC, RxNorm, ATC, SNOMED CT, CPT, ICD-10-PCS, and the project-local observation system. External systems are represented by small local subsets, not complete releases.
+The local registry contains small subsets of ICD-10-CM, LOINC, RxNorm, ATC, SNOMED CT, CPT, and ICD-10-PCS. It is not a complete terminology server.
 
-Bundled local-to-LOINC mappings:
-
-| Local source code | Normalized code |
-|---|---|
-| `SYSTOLIC_BP` | `LOINC:8480-6` |
-| `DIASTOLIC_BP` | `LOINC:8462-4` |
-| `HEART_RATE` | `LOINC:8867-4` |
-
-Unknown systems, unknown codes, inactive concepts, and wrong-domain concepts are rejected during persistence. The resulting failure is audited while clinical rows are rolled back.
-
-See [`docs/terminology.md`](docs/terminology.md).
-
-## Clinical history policy
-
-Every current clinical row has a `record_sha256` calculated from normalized business content. Lineage and terminology foreign keys are excluded so operational metadata does not create false clinical changes.
-
-Patient demographic changes append SCD Type 2 versions to `clinical.patient_history`. Encounter, diagnosis, observation, medication, and procedure events are immutable.
+The Synthea adapter writes source concepts used by the generated population. Concepts absent from the curated subset are imported explicitly as `unverified`, not presented as independently verified terminology content.
 
 ## Immutable raw landing zone
-
-Sources are captured before parsing under:
 
 ```text
 data/raw/
@@ -265,12 +248,6 @@ This is application-level local immutability, not certified WORM storage.
 
 ## Executable contracts
 
-Active versions are selected by:
-
-```text
-src/clinical_data_platform/contracts/manifest.toml
-```
-
 ```text
 contracts/
 ├── patients/v1.0.0.toml
@@ -281,75 +258,48 @@ contracts/
 └── procedures/v1.0.0.toml
 ```
 
-The contract engine executes structural, required-value, uniqueness, type, categorical, temporal, unit, and plausible-range rules. Every validation run records exact contract path, version, and SHA-256.
+The engine executes structural, required-value, uniqueness, type, categorical, temporal, unit, and plausible-range rules. Every validation run records contract path, version, and SHA-256.
 
 ## PostgreSQL migrations
 
 ```text
-migrations/
-├── V001__create_core_clinical_schema.sql
-├── V002__add_longitudinal_entities_and_cohorts.sql
-├── V003__add_contract_lineage.sql
-├── V004__add_raw_landing_lineage.sql
-├── V005__add_clinical_history_policy.sql
-├── V006__add_medications_and_procedures.sql
-├── V007__add_minimal_clinical_terminologies.sql
-└── V008__add_execution_lifecycle_audit.sql
+V001 core schemas and patients
+V002 encounters, diagnoses, observations, cohorts
+V003 contract lineage
+V004 raw lineage
+V005 patient SCD2 and immutable-event policy
+V006 medications and procedures
+V007 minimal terminology integration
+V008 execution lifecycle and durable failure audit
 ```
 
-Migration history is stored in `public.schema_migrations`. The engine verifies contiguous ordering, names, checksums, detected structure, pending versions, and downgrade attempts. Migrations execute transactionally under a PostgreSQL advisory lock.
-
-Logging does not require a new database migration because it is an application-output concern, not persistent schema state.
+Synthea and structured logging do not require new database migrations because they add application workflows and output artifacts rather than persistent schema state.
 
 ## Implemented capabilities
 
+- reproducible Synthea profile with pinned release, seeds, reference date, geography, and single-thread generation;
+- generation and adaptation manifests with SHA-256 fingerprints;
+- deterministic Synthea-to-contract adapter and UUIDv5 event identities;
 - six contract-governed clinical datasets;
-- structured JSON logging with a versioned schema;
-- correlation IDs and context propagation through nested operations;
-- paired started/completed/failed events with durations;
-- credential and clinical-identifier redaction;
-- explicit run state machine and retry attempts;
+- structured JSON logging and correlation context;
+- explicit run lifecycle, retries, and durable failure metadata;
 - hash-chained local validation journals;
-- durable PostgreSQL execution timelines and failure metadata;
-- clinical rollback without losing failure evidence;
-- minimal versioned terminology registry and normalized concepts;
-- immutable content-addressed raw capture and append-only receipts;
-- normalized validation errors and rejected-record quarantine;
-- source, raw, contract, run, record, terminology, and cohort lineage;
-- formal install, upgrade, baseline, and drift checks;
+- minimal terminology registry and normalized concepts;
+- immutable content-addressed raw capture;
 - patient SCD Type 2 history and immutable clinical events;
-- transactional and run-idempotent persistence;
-- versioned hypertension cohort and baseline features;
-- Docker, Docker Compose, PowerShell, POSIX, Ruff, strict mypy, pytest, coverage, PostgreSQL integration tests, and GitHub Actions.
+- transactional, run-idempotent PostgreSQL persistence;
+- versioned hypertension cohort and feature export;
+- Docker, Compose, PowerShell, POSIX, Ruff, strict mypy, pytest, coverage, PostgreSQL integration, and GitHub Actions.
 
-## Fastest complete run
+## Fastest bundled demo
 
 Requirements: Git and Docker with Docker Compose.
-
-```bash
-git clone https://github.com/jennerfeijoo/clinical-data-platform.git
-cd clinical-data-platform
-```
-
-PowerShell:
 
 ```powershell
 .\scripts\run_demo.ps1
 ```
 
-POSIX shell:
-
-```bash
-sh scripts/run_demo.sh
-```
-
-The demo captures, validates, audits, migrates, normalizes coded concepts, persists, builds the hypertension cohort, and writes:
-
-```text
-data/raw/
-data/processed/
-data/analytics/
-```
+The bundled demo uses the small checked-in project sample. The Synthea generation workflow is separate because it requires Java 17+, Git, upstream cloning, and generation time.
 
 ## Local Python development
 
@@ -369,7 +319,7 @@ clinical-data database-validate
 clinical-data run-demo --repository-root .
 ```
 
-A current database reports:
+Current migration state:
 
 ```text
 detected=8
@@ -389,46 +339,14 @@ pending=[]
 | Medications | 7 | 6 | 1 | 6 |
 | Procedures | 7 | 6 | 1 | 6 |
 
-The clean demo produces six completed runs with six audit events each, 31 normalized terminology bindings, and a hypertension cohort containing `P001` and `P002`.
-
-## Inspect execution state
-
-```sql
-SELECT
-    run_id,
-    dataset_name,
-    status,
-    current_stage,
-    attempt_count,
-    failure_code,
-    failure_message,
-    audit_event_count,
-    audit_gap_reason
-FROM audit.pipeline_runs
-ORDER BY updated_at DESC;
-```
-
-Timeline for one run:
-
-```sql
-SELECT
-    sequence_number,
-    attempt_number,
-    from_status,
-    to_status,
-    stage,
-    occurred_at,
-    error_code,
-    error_message,
-    event_sha256
-FROM audit.pipeline_run_timeline
-WHERE run_id = '<run-uuid>'
-ORDER BY sequence_number;
-```
+The clean bundled demo produces six completed runs, 31 normalized terminology bindings, and a hypertension cohort containing `P001` and `P002`.
 
 ## Quality checks
 
 ```bash
+clinical-data synthea-profile
+clinical-data synthea-adapt tests/fixtures/synthea/csv --output-dir /tmp/synthea-normalized
+clinical-data synthea-verify /tmp/synthea-normalized
 clinical-data validate-contracts
 clinical-data database-migrate
 clinical-data database-validate
@@ -438,33 +356,33 @@ python -m pytest --cov=clinical_data_platform --cov-report=term-missing
 docker build --tag clinical-data-platform:local .
 ```
 
-CI exercises the installed structured-logging entrypoint, contracts, V001–V008 migrations, raw capture, local and durable audit chains, retries, failure rollback, patient history, six entities, terminology resolution, cohort generation, and container smoke tests.
+Normal CI validates the installed profile, exact Synthea CSV schema, deterministic adapter, manifest verification, terminology import, all existing platform controls, and PostgreSQL loading. It does not execute the full upstream Java generator.
 
 ## Documentation
 
+- [`docs/synthea.md`](docs/synthea.md): generation, manifests, adapter, verification, and loading;
 - [`docs/architecture.md`](docs/architecture.md): system architecture and boundaries;
 - [`docs/database.md`](docs/database.md): migrations, persistence, and lineage;
 - [`docs/execution-audit.md`](docs/execution-audit.md): lifecycle, transactions, retries, and inspection;
-- [`docs/structured-logging.md`](docs/structured-logging.md): schema, configuration, redaction, event names, and queries;
+- [`docs/structured-logging.md`](docs/structured-logging.md): logging schema and redaction;
 - [`docs/clinical-history-policy.md`](docs/clinical-history-policy.md): snapshot and immutable-event policy;
 - [`docs/clinical-entities.md`](docs/clinical-entities.md): six-entity model;
 - [`docs/terminology.md`](docs/terminology.md): terminology model and licensing boundary;
-- [`docs/analysis-guide.md`](docs/analysis-guide.md): review sequence and SQL;
-- [`docs/learning/execution-audit-es.md`](docs/learning/execution-audit-es.md): Spanish execution-audit study guide;
-- [`docs/learning/structured-logging-es.md`](docs/learning/structured-logging-es.md): Spanish structured-logging study guide;
+- [`docs/analysis-guide.md`](docs/analysis-guide.md): repository review sequence;
+- [`docs/learning/reproducible-synthea-es.md`](docs/learning/reproducible-synthea-es.md): Spanish Synthea reproducibility guide;
 - additional learning guides under [`docs/learning/`](docs/learning/).
 
 ## Current limitations
 
 The repository is not yet version `1.0.0`. Remaining milestones include:
 
-- reproducible Synthea datasets;
-- bulk PostgreSQL `COPY` loading and benchmarks;
+- bulk PostgreSQL `COPY` loading;
+- a documented benchmark using a larger generated population;
 - an additional cohort with attrition and missingness reporting;
 - coverage of at least 90%;
 - multi-version CI, security, container, and release hardening.
 
-The logging layer does not include centralized transport, OpenTelemetry, metrics, dashboards, alerts, automatic rotation, or production retention controls. The execution journal is tamper-evident but not administrator-resistant WORM storage. The terminology layer remains a small local subset. The project intentionally excludes identifiable patient data, production decision support, enterprise authentication, and regulatory deployment claims.
+The full Synthea generator is not executed in normal CI. The current adapter supports only six CSV files and three observation concepts. Newly discovered source concepts are retained as unverified. The logging layer has no centralized transport or OpenTelemetry. The project excludes identifiable patient data, production decision support, epidemiological validity claims, and regulatory deployment claims.
 
 ## License
 
