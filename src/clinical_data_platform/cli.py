@@ -273,18 +273,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "database-migrate":
         with connect_database(_database_url(args.database_url)) as connection:
-            summary = migrate_database(
+            migration_summary = migrate_database(
                 connection,
                 target_version=args.target_version,
                 baseline_existing=args.baseline_existing,
             )
         print(
             "Database migration completed: "
-            f"previous={summary.previous_version}, "
-            f"current={summary.current_version}, "
-            f"target={summary.target_version}, "
-            f"baselined={list(summary.baselined_versions)}, "
-            f"applied={list(summary.applied_versions)}"
+            f"previous={migration_summary.previous_version}, "
+            f"current={migration_summary.current_version}, "
+            f"target={migration_summary.target_version}, "
+            f"baselined={list(migration_summary.baselined_versions)}, "
+            f"applied={list(migration_summary.applied_versions)}"
         )
         return 0
 
@@ -317,7 +317,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "validate-dataset":
         output_directory = args.output_dir or _default_output_directory(args.dataset)
-        summary = run_dataset_validation(
+        validation_summary = run_dataset_validation(
             args.dataset,
             args.input,
             output_directory,
@@ -325,11 +325,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             reference_date=args.reference_date,
         )
         print(
-            f"{summary.dataset} validation completed: "
-            f"run_id={summary.run_id}, raw_receipt_id={summary.raw_receipt_id}, "
-            f"contract={summary.contract_version}, received={summary.rows_received}, "
-            f"valid={summary.rows_valid}, invalid={summary.rows_invalid}, "
-            f"errors={summary.validation_errors}"
+            f"{validation_summary.dataset} validation completed: "
+            f"run_id={validation_summary.run_id}, "
+            f"raw_receipt_id={validation_summary.raw_receipt_id}, "
+            f"contract={validation_summary.contract_version}, "
+            f"received={validation_summary.rows_received}, "
+            f"valid={validation_summary.rows_valid}, "
+            f"invalid={validation_summary.rows_invalid}, "
+            f"errors={validation_summary.validation_errors}"
         )
         return 0
 
@@ -337,18 +340,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_directory = args.output_dir or _default_output_directory(args.dataset)
         with connect_database(_database_url(args.database_url)) as connection:
             migrate_database(connection, baseline_existing=args.baseline_existing)
-            summary = persist_dataset_validation_outputs(
+            persistence_summary = persist_dataset_validation_outputs(
                 connection,
                 args.dataset,
                 output_directory,
                 raw_root=args.raw_root,
             )
         print(
-            f"{summary.dataset} persistence completed: "
-            f"run_id={summary.run_id}, contract={summary.contract_version}, "
-            f"already_loaded={summary.already_loaded}, "
-            f"records={summary.records_upserted}, "
-            f"errors={summary.validation_errors_inserted}"
+            f"{persistence_summary.dataset} persistence completed: "
+            f"run_id={persistence_summary.run_id}, "
+            f"contract={persistence_summary.contract_version}, "
+            f"already_loaded={persistence_summary.already_loaded}, "
+            f"records={persistence_summary.records_upserted}, "
+            f"errors={persistence_summary.validation_errors_inserted}"
         )
         return 0
 
