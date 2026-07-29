@@ -51,11 +51,13 @@ def _source_runs(
 ) -> tuple[tuple[UUID, str], ...]:
     rows = connection.execute(
         """
-        SELECT run_id, dataset_name
+        SELECT DISTINCT ON (dataset_name)
+            run_id,
+            dataset_name
         FROM audit.pipeline_runs
         WHERE status = 'completed'
           AND dataset_name = ANY(%s)
-        ORDER BY loaded_at, run_id
+        ORDER BY dataset_name, loaded_at DESC, run_id DESC
         """,
         (list(REQUIRED_SOURCE_DATASETS),),
     ).fetchall()
