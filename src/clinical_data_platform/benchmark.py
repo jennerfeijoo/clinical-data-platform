@@ -25,6 +25,9 @@ from psycopg import sql
 
 import clinical_data_platform
 from clinical_data_platform.bulk import CopyMergePlan, copy_merge_rows
+from clinical_data_platform.benchmark_safety import (
+    assert_isolated_empty_benchmark_database,
+)
 from clinical_data_platform.models import ClinicalRecord
 from clinical_data_platform.registry import dataset_names, get_dataset_definition
 
@@ -40,7 +43,7 @@ class BenchmarkConfiguration:
     """Parameters that define one reproducible benchmark execution."""
 
     patient_counts: tuple[int, ...] = (250, 1000, 2500)
-    repetitions: int = 5
+    repetitions: int = 6
     warmups: int = 1
     seed: int = 20260729
 
@@ -49,8 +52,11 @@ class BenchmarkConfiguration:
             raise ValueError("Benchmark patient counts must contain positive integers.")
         if tuple(sorted(set(self.patient_counts))) != self.patient_counts:
             raise ValueError("Benchmark patient counts must be unique and increasing.")
-        if self.repetitions <= 0:
-            raise ValueError("Benchmark repetitions must be positive.")
+        if self.repetitions <= 0 or self.repetitions % 2 != 0:
+            raise ValueError(
+                "Benchmark repetitions must be a positive even integer so method "
+                "starting positions are balanced."
+            )
         if self.warmups < 0:
             raise ValueError("Benchmark warmups must be non-negative.")
 
@@ -830,6 +836,7 @@ def run_loading_benchmark(
     configuration: BenchmarkConfiguration | None = None,
 ) -> BenchmarkArtifacts:
     """Run, verify and export a reproducible COPY versus executemany benchmark."""
+    assert_isolated_empty_benchmark_database(connection)
     effective = configuration or BenchmarkConfiguration()
     output_directory.mkdir(parents=True, exist_ok=True)
     workloads = [
