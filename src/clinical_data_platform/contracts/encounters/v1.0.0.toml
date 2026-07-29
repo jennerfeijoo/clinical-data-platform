@@ -1,0 +1,47 @@
+[dataset]
+name = "encounters"
+version = "1.0.0"
+primary_key = "encounter_id"
+patient_id_column = "patient_id"
+allow_extra_columns = false
+
+[[order_rules]]
+earlier_field = "start_datetime"
+later_field = "end_datetime"
+
+[[columns]]
+name = "encounter_id"
+type = "string"
+required = true
+unique = true
+
+[[columns]]
+name = "patient_id"
+type = "string"
+required = true
+unique = false
+
+[[columns]]
+name = "encounter_type"
+type = "string"
+required = true
+unique = false
+allowed_values = ["OUTPATIENT", "INPATIENT", "EMERGENCY"]
+
+[[columns]]
+name = "start_datetime"
+type = "datetime"
+required = true
+unique = false
+
+[[columns]]
+name = "end_datetime"
+type = "datetime"
+required = true
+unique = false
+
+[[columns]]
+name = "source_system"
+type = "string"
+required = true
+unique = false
