@@ -4,7 +4,7 @@ WITH hypertension_index AS (
         MIN(diagnosis_datetime)::date AS index_date
     FROM clinical.diagnoses
     WHERE code_system = 'ICD10'
-      AND diagnosis_code LIKE 'I10%'
+      AND LEFT(diagnosis_code, 3) = 'I10'
     GROUP BY patient_id
 ),
 eligible_patients AS (
