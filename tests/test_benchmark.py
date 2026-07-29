@@ -1,3 +1,5 @@
+import csv
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -13,6 +15,14 @@ from clinical_data_platform.benchmark import (
 )
 from clinical_data_platform.benchmark_cli import build_parser
 from clinical_data_platform.migration import migrate_database
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+REFERENCE_DIRECTORY = (
+    REPOSITORY_ROOT
+    / "benchmarks"
+    / "loading"
+    / "github-actions-run-30466706538"
+)
 
 
 def test_benchmark_configuration_requires_increasing_unique_sizes() -> None:
@@ -59,6 +69,30 @@ def test_benchmark_cli_accepts_explicit_protocol() -> None:
     assert args.repetitions == 3
     assert args.warmups == 0
     assert args.seed == 42
+
+
+def test_committed_reference_evidence_is_internally_consistent() -> None:
+    reference_path = REFERENCE_DIRECTORY / "reference-run.json"
+    trials_path = REFERENCE_DIRECTORY / "benchmark-trials.csv"
+    document = json.loads(reference_path.read_text(encoding="utf-8"))
+
+    trials_sha256 = hashlib.sha256(trials_path.read_bytes()).hexdigest()
+    assert document["schema_version"] == BENCHMARK_SCHEMA_VERSION
+    assert document["evidence"]["workflow_run_id"] == "30466706538"
+    assert document["evidence"]["source_trials_sha256"] == trials_sha256
+    assert document["configuration"]["patient_counts"] == [250, 1000, 2500]
+    assert document["configuration"]["repetitions"] == 5
+    assert all(item["copy_speedup"] > 1 for item in document["comparisons"])
+
+    with trials_path.open(encoding="utf-8", newline="") as file:
+        trials = list(csv.DictReader(file))
+
+    assert len(trials) == 30
+    for patient_count in ("250", "1000", "2500"):
+        size_trials = [trial for trial in trials if trial["patient_count"] == patient_count]
+        assert len(size_trials) == 10
+        assert {trial["method"] for trial in size_trials} == {"copy", "executemany"}
+        assert len({trial["database_fingerprint"] for trial in size_trials}) == 1
 
 
 @pytest.mark.integration
