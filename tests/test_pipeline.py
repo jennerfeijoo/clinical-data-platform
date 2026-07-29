@@ -25,7 +25,7 @@ def _count_csv_rows(path: Path) -> int:
         ("observations", 14, 13, 1, 1),
     ],
 )
-def test_generic_pipeline_writes_consistent_outputs(
+def test_generic_pipeline_writes_consistent_contract_governed_outputs(
     tmp_path: Path,
     dataset: str,
     received: int,
@@ -42,6 +42,8 @@ def test_generic_pipeline_writes_consistent_outputs(
     )
 
     assert summary.dataset == dataset
+    assert summary.contract_version == "1.0.0"
+    assert len(summary.contract_sha256) == 64
     assert summary.rows_received == received
     assert summary.rows_valid == valid
     assert summary.rows_invalid == invalid
@@ -52,6 +54,9 @@ def test_generic_pipeline_writes_consistent_outputs(
 
     report = json.loads(summary.quality_report_path.read_text(encoding="utf-8"))
     assert report["dataset"] == dataset
+    assert report["contract_version"] == "1.0.0"
+    assert report["contract_sha256"] == summary.contract_sha256
+    assert report["contract_path"].endswith("v1.0.0.toml")
     assert report["rows_received"] == received
     assert report["rows_valid"] == valid
     assert report["rows_invalid"] == invalid
@@ -59,7 +64,7 @@ def test_generic_pipeline_writes_consistent_outputs(
     assert len(report["input_sha256"]) == 64
 
 
-def test_patient_rules_are_executed_through_generic_pipeline(tmp_path: Path) -> None:
+def test_patient_rules_are_executed_from_contract(tmp_path: Path) -> None:
     summary = run_dataset_validation(
         "patients",
         SAMPLE_DIRECTORY / "patients.csv",
