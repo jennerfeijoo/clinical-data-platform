@@ -35,16 +35,24 @@ jobs:
       - name: Audit installed Python dependencies
         run: |
           mkdir -p security-reports
+          audit_status=0
+          sbom_status=0
           python -m pip_audit \
             --local \
             --progress-spinner off \
             --format json \
-            --output security-reports/pip-audit.json
+            --output security-reports/pip-audit.json \
+            || audit_status=$?
           python -m pip_audit \
             --local \
             --progress-spinner off \
             --format cyclonedx-json \
-            --output security-reports/python-sbom.cdx.json
+            --output security-reports/python-sbom.cdx.json \
+            || sbom_status=$?
+          if [ "$audit_status" -ne 0 ]; then
+            exit "$audit_status"
+          fi
+          exit "$sbom_status"
 
       - name: Upload dependency evidence
         if: always()
