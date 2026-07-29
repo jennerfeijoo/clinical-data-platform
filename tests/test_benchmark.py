@@ -73,11 +73,22 @@ def test_benchmark_cli_accepts_explicit_protocol() -> None:
     assert args.seed == 42
 
 
-def test_benchmark_cli_rejects_missing_destructive_confirmation(
+def test_benchmark_cli_rejects_unconfirmed_nondefault_database(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     with pytest.raises(SystemExit) as error:
-        main(["--patients", "1", "--repetitions", "1", "--warmups", "0"])
+        main(
+            [
+                "--database-url",
+                "postgresql://user:password@database.example/important",
+                "--patients",
+                "1",
+                "--repetitions",
+                "1",
+                "--warmups",
+                "0",
+            ]
+        )
     assert error.value.code == 2
     assert "--allow-destructive-reset is required" in capsys.readouterr().err
 
