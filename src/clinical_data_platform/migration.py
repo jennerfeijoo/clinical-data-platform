@@ -255,6 +255,28 @@ def _detect_existing_schema_version(connection: psycopg.Connection[Any]) -> int:
             )
         version = 5
 
+    additional_entity_tables = (
+        "clinical.medications",
+        "clinical.procedures",
+    )
+    additional_entity_presence = tuple(
+        _table_exists(connection, table) for table in additional_entity_tables
+    )
+    additional_hash_presence = tuple(
+        _column_exists(connection, "clinical", table_name, "record_sha256")
+        for table_name in ("medications", "procedures")
+    )
+    if any(additional_entity_presence) or any(additional_hash_presence):
+        if (
+            not all(additional_entity_presence)
+            or not all(additional_hash_presence)
+            or version < 5
+        ):
+            raise MigrationHistoryError(
+                "The database contains a partial six-entity schema and cannot be baselined."
+            )
+        version = 6
+
     return version
 
 

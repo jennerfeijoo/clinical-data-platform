@@ -45,6 +45,21 @@ class DatasetDefinition:
         return self.contract.primary_key
 
 
+def _optional_datetime(value: str) -> datetime | None:
+    stripped = value.strip()
+    return datetime.fromisoformat(stripped) if stripped else None
+
+
+def _optional_float(value: str) -> float | None:
+    stripped = value.strip()
+    return float(stripped) if stripped else None
+
+
+def _optional_text(value: str) -> str | None:
+    stripped = value.strip()
+    return stripped or None
+
+
 def _patient_rows(
     records: list[ClinicalRecord],
     run_id: UUID,
@@ -74,12 +89,12 @@ def _encounter_rows(
 ) -> list[tuple[object, ...]]:
     return [
         (
-            record["encounter_id"],
-            record["patient_id"],
-            record["encounter_type"],
-            datetime.fromisoformat(record["start_datetime"]),
-            datetime.fromisoformat(record["end_datetime"]),
-            record["source_system"],
+            record["encounter_id"].strip(),
+            record["patient_id"].strip(),
+            record["encounter_type"].strip(),
+            datetime.fromisoformat(record["start_datetime"].strip()),
+            datetime.fromisoformat(record["end_datetime"].strip()),
+            record["source_system"].strip(),
             run_id,
             source_sha256,
         )
@@ -94,13 +109,13 @@ def _diagnosis_rows(
 ) -> list[tuple[object, ...]]:
     return [
         (
-            record["diagnosis_id"],
-            record["patient_id"],
-            record["encounter_id"],
-            record["code_system"],
-            record["diagnosis_code"],
-            datetime.fromisoformat(record["diagnosis_datetime"]),
-            record["source_system"],
+            record["diagnosis_id"].strip(),
+            record["patient_id"].strip(),
+            record["encounter_id"].strip(),
+            record["code_system"].strip(),
+            record["diagnosis_code"].strip(),
+            datetime.fromisoformat(record["diagnosis_datetime"].strip()),
+            record["source_system"].strip(),
             run_id,
             source_sha256,
         )
@@ -115,14 +130,62 @@ def _observation_rows(
 ) -> list[tuple[object, ...]]:
     return [
         (
-            record["observation_id"],
-            record["patient_id"],
-            record["encounter_id"],
-            record["observation_code"],
-            float(record["value_numeric"]),
-            record["unit"],
-            datetime.fromisoformat(record["observed_at"]),
-            record["source_system"],
+            record["observation_id"].strip(),
+            record["patient_id"].strip(),
+            record["encounter_id"].strip(),
+            record["observation_code"].strip(),
+            float(record["value_numeric"].strip()),
+            record["unit"].strip(),
+            datetime.fromisoformat(record["observed_at"].strip()),
+            record["source_system"].strip(),
+            run_id,
+            source_sha256,
+        )
+        for record in records
+    ]
+
+
+def _medication_rows(
+    records: list[ClinicalRecord],
+    run_id: UUID,
+    source_sha256: str,
+) -> list[tuple[object, ...]]:
+    return [
+        (
+            record["medication_id"].strip(),
+            record["patient_id"].strip(),
+            record["encounter_id"].strip(),
+            record["code_system"].strip(),
+            record["medication_code"].strip(),
+            record["status"].strip(),
+            datetime.fromisoformat(record["start_datetime"].strip()),
+            _optional_datetime(record["end_datetime"]),
+            _optional_float(record["dose_value"]),
+            _optional_text(record["dose_unit"]),
+            _optional_text(record["route"]),
+            record["source_system"].strip(),
+            run_id,
+            source_sha256,
+        )
+        for record in records
+    ]
+
+
+def _procedure_rows(
+    records: list[ClinicalRecord],
+    run_id: UUID,
+    source_sha256: str,
+) -> list[tuple[object, ...]]:
+    return [
+        (
+            record["procedure_id"].strip(),
+            record["patient_id"].strip(),
+            record["encounter_id"].strip(),
+            record["code_system"].strip(),
+            record["procedure_code"].strip(),
+            datetime.fromisoformat(record["procedure_datetime"].strip()),
+            record["status"].strip(),
+            record["source_system"].strip(),
             run_id,
             source_sha256,
         )
@@ -202,6 +265,51 @@ OBSERVATION_UPSERT_SQL = """
         loaded_at = CURRENT_TIMESTAMP
 """
 
+MEDICATION_UPSERT_SQL = """
+    INSERT INTO clinical.medications (
+        medication_id, patient_id, encounter_id, code_system,
+        medication_code, status, start_datetime, end_datetime,
+        dose_value, dose_unit, route, source_system,
+        source_run_id, source_sha256
+    )
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (medication_id) DO UPDATE SET
+        patient_id = EXCLUDED.patient_id,
+        encounter_id = EXCLUDED.encounter_id,
+        code_system = EXCLUDED.code_system,
+        medication_code = EXCLUDED.medication_code,
+        status = EXCLUDED.status,
+        start_datetime = EXCLUDED.start_datetime,
+        end_datetime = EXCLUDED.end_datetime,
+        dose_value = EXCLUDED.dose_value,
+        dose_unit = EXCLUDED.dose_unit,
+        route = EXCLUDED.route,
+        source_system = EXCLUDED.source_system,
+        source_run_id = EXCLUDED.source_run_id,
+        source_sha256 = EXCLUDED.source_sha256,
+        loaded_at = CURRENT_TIMESTAMP
+"""
+
+PROCEDURE_UPSERT_SQL = """
+    INSERT INTO clinical.procedures (
+        procedure_id, patient_id, encounter_id, code_system,
+        procedure_code, procedure_datetime, status, source_system,
+        source_run_id, source_sha256
+    )
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (procedure_id) DO UPDATE SET
+        patient_id = EXCLUDED.patient_id,
+        encounter_id = EXCLUDED.encounter_id,
+        code_system = EXCLUDED.code_system,
+        procedure_code = EXCLUDED.procedure_code,
+        procedure_datetime = EXCLUDED.procedure_datetime,
+        status = EXCLUDED.status,
+        source_system = EXCLUDED.source_system,
+        source_run_id = EXCLUDED.source_run_id,
+        source_sha256 = EXCLUDED.source_sha256,
+        loaded_at = CURRENT_TIMESTAMP
+"""
+
 
 DATASET_REGISTRY: dict[str, DatasetDefinition] = {
     "patients": DatasetDefinition(
@@ -223,6 +331,16 @@ DATASET_REGISTRY: dict[str, DatasetDefinition] = {
         name="observations",
         row_builder=_observation_rows,
         upsert_sql=OBSERVATION_UPSERT_SQL,
+    ),
+    "medications": DatasetDefinition(
+        name="medications",
+        row_builder=_medication_rows,
+        upsert_sql=MEDICATION_UPSERT_SQL,
+    ),
+    "procedures": DatasetDefinition(
+        name="procedures",
+        row_builder=_procedure_rows,
+        upsert_sql=PROCEDURE_UPSERT_SQL,
     ),
 }
 

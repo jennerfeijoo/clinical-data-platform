@@ -1,0 +1,87 @@
+not_future_fields = ["start_datetime"]
+
+[dataset]
+name = "medications"
+version = "1.0.0"
+primary_key = "medication_id"
+patient_id_column = "patient_id"
+allow_extra_columns = false
+
+[[order_rules]]
+earlier_field = "start_datetime"
+later_field = "end_datetime"
+
+[[columns]]
+name = "medication_id"
+type = "string"
+required = true
+unique = true
+
+[[columns]]
+name = "patient_id"
+type = "string"
+required = true
+unique = false
+
+[[columns]]
+name = "encounter_id"
+type = "string"
+required = true
+unique = false
+
+[[columns]]
+name = "code_system"
+type = "string"
+required = true
+unique = false
+allowed_values = ["RXNORM", "ATC"]
+
+[[columns]]
+name = "medication_code"
+type = "string"
+required = true
+unique = false
+
+[[columns]]
+name = "status"
+type = "string"
+required = true
+unique = false
+allowed_values = ["ACTIVE", "COMPLETED", "STOPPED"]
+
+[[columns]]
+name = "start_datetime"
+type = "datetime"
+required = true
+unique = false
+
+[[columns]]
+name = "end_datetime"
+type = "datetime"
+required = false
+unique = false
+
+[[columns]]
+name = "dose_value"
+type = "number"
+required = false
+unique = false
+
+[[columns]]
+name = "dose_unit"
+type = "string"
+required = false
+unique = false
+
+[[columns]]
+name = "route"
+type = "string"
+required = false
+unique = false
+allowed_values = ["ORAL", "INTRAVENOUS", "SUBCUTANEOUS", "INHALATION", "TOPICAL"]
+
+[[columns]]
+name = "source_system"
+type = "string"
+required = true
+unique = false

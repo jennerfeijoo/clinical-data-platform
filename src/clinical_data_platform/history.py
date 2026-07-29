@@ -58,6 +58,24 @@ CLINICAL_HISTORY_POLICIES: dict[str, ClinicalHistoryPolicy] = {
         duplicate_behavior="preserve the original event and lineage",
         conflicting_identity_behavior="reject the transaction",
     ),
+    "medications": ClinicalHistoryPolicy(
+        dataset="medications",
+        mode="immutable_event",
+        identity_column="medication_id",
+        current_table="clinical.medications",
+        history_table=None,
+        duplicate_behavior="preserve the original event and lineage",
+        conflicting_identity_behavior="reject the transaction",
+    ),
+    "procedures": ClinicalHistoryPolicy(
+        dataset="procedures",
+        mode="immutable_event",
+        identity_column="procedure_id",
+        current_table="clinical.procedures",
+        history_table=None,
+        duplicate_behavior="preserve the original event and lineage",
+        conflicting_identity_behavior="reject the transaction",
+    ),
 }
 
 
