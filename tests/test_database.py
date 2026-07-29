@@ -1,3 +1,4 @@
+import json
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -7,6 +8,7 @@ import pytest
 
 from clinical_data_platform.database import (
     DatabaseConfigurationError,
+    PersistenceError,
     database_url_from_environment,
     persist_dataset_validation_outputs,
 )
@@ -32,14 +34,17 @@ def test_missing_database_url_is_reported(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 @pytest.mark.integration
-def test_registered_dataset_is_persisted_with_contract_lineage(
+def test_dataset_is_persisted_with_contract_and_raw_lineage(
     tmp_path: Path,
     clean_database_connection: psycopg.Connection[Any],
 ) -> None:
+    output_directory = tmp_path / "processed"
+    raw_root = tmp_path / "raw"
     validation_summary = run_dataset_validation(
         "patients",
         SAMPLE_DATASET,
-        tmp_path,
+        output_directory,
+        raw_root=raw_root,
         reference_date=date(2026, 7, 29),
     )
     connection = clean_database_connection
@@ -47,7 +52,8 @@ def test_registered_dataset_is_persisted_with_contract_lineage(
     persistence_summary = persist_dataset_validation_outputs(
         connection,
         "patients",
-        tmp_path,
+        output_directory,
+        raw_root=raw_root,
     )
 
     assert persistence_summary.run_id == validation_summary.run_id
@@ -59,7 +65,15 @@ def test_registered_dataset_is_persisted_with_contract_lineage(
 
     run_row = connection.execute(
         """
-        SELECT contract_version, contract_sha256, contract_path
+        SELECT
+            contract_version,
+            contract_sha256,
+            contract_path,
+            raw_receipt_id,
+            raw_manifest_path,
+            raw_manifest_sha256,
+            raw_object_path,
+            raw_size_bytes
         FROM audit.pipeline_runs
         WHERE run_id = %s
         """,
@@ -78,14 +92,50 @@ def test_registered_dataset_is_persisted_with_contract_lineage(
     assert run_row[0] == "1.0.0"
     assert run_row[1] == validation_summary.contract_sha256
     assert str(run_row[2]).endswith("v1.0.0.toml")
+    assert run_row[3] == validation_summary.raw_receipt_id
+    assert run_row[4] == validation_summary.raw_manifest_relative_path
+    assert run_row[5] == validation_summary.raw_manifest_sha256
+    assert run_row[6] == validation_summary.raw_object_relative_path
+    assert run_row[7] == validation_summary.raw_size_bytes
     assert patient_count is not None and patient_count[0] == 5
     assert error_count is not None and error_count[0] == 3
 
     repeated_load = persist_dataset_validation_outputs(
         connection,
         "patients",
-        tmp_path,
+        output_directory,
+        raw_root=raw_root,
     )
     assert repeated_load.already_loaded is True
     assert repeated_load.records_upserted == 0
     assert repeated_load.validation_errors_inserted == 0
+
+
+@pytest.mark.integration
+def test_persistence_rejects_tampered_raw_manifest_lineage(
+    tmp_path: Path,
+    clean_database_connection: psycopg.Connection[Any],
+) -> None:
+    output_directory = tmp_path / "processed"
+    raw_root = tmp_path / "raw"
+    summary = run_dataset_validation(
+        "patients",
+        SAMPLE_DATASET,
+        output_directory,
+        raw_root=raw_root,
+        reference_date=date(2026, 7, 29),
+    )
+    report_path = summary.quality_report_path
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["raw_manifest_sha256"] = "0" * 64
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    connection = clean_database_connection
+    migrate_database(connection)
+    with pytest.raises(PersistenceError, match="raw_manifest_sha256"):
+        persist_dataset_validation_outputs(
+            connection,
+            "patients",
+            output_directory,
+            raw_root=raw_root,
+        )
