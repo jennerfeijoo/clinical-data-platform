@@ -1,6 +1,6 @@
 param(
     [int[]]$Patients = @(250, 1000, 2500),
-    [int]$Repetitions = 5,
+    [int]$Repetitions = 6,
     [int]$Warmups = 1,
     [int]$Seed = 20260729,
     [string]$OutputDirectory = "data/benchmarks/loading"
