@@ -1,63 +1,59 @@
 # Guía de estudio: benchmark reproducible de carga PostgreSQL
 
-## 1. Qué problema resuelve este hito
+## 1. Por qué se necesita este hito
 
-Implementar `COPY` no demuestra por sí solo que la nueva ruta sea más rápida. Para sostener una afirmación de rendimiento se necesitan, como mínimo:
+Implementar `COPY` no demuestra por sí solo que la nueva ruta sea más rápida. Una afirmación de rendimiento necesita:
 
 ```text
-una pregunta delimitada
-un método de referencia
-la misma carga para ambos métodos
-un entorno registrado
+pregunta delimitada
+método de referencia
+misma carga para ambos métodos
+entorno registrado
 repeticiones
-una métrica definida
+métrica definida
 verificación de equivalencia
-resultados sin seleccionar solo la mejor ejecución
+resultados completos
 límites de interpretación
 ```
-
-Este hito convierte la frase informal «COPY debería ser más rápido» en una comparación ejecutable y auditable.
 
 La pregunta estudiada es:
 
 > ¿Cuánto cambia el tiempo de carga inicial cuando la plataforma usa COPY a staging temporal y merge por conjuntos, comparado con su ruta previa basada en `executemany`, manteniendo activo el mismo modelo clínico gobernado?
 
-## 2. Benchmark, prueba y perfilado no son lo mismo
+## 2. Prueba, benchmark y perfilado
 
 ### Prueba funcional
 
-Responde preguntas como:
+Comprueba propiedades como:
 
 ```text
-¿se insertaron todas las filas?
-¿se rechazó un conflicto inmutable?
-¿se creó el historial SCD2?
-¿los dos métodos producen el mismo contenido?
+se insertaron todas las filas
+se creó el historial SCD2
+se resolvió la terminología
+se rechazó un conflicto inmutable
+los dos métodos dejaron el mismo contenido
 ```
-
-Una prueba puede afirmar correcto o incorrecto. No necesita medir rendimiento con precisión.
 
 ### Benchmark
 
-Responde preguntas como:
+Mide:
 
 ```text
-¿cuánto tarda cada método?
-¿cuál es la mediana?
-¿cuántas filas por segundo procesa?
-¿cómo cambia la diferencia al aumentar el tamaño?
+tiempo por método
+mediana
+variabilidad
+filas por segundo
+cambio al aumentar el tamaño
 ```
-
-Un benchmark necesita repetición, entorno y protocolo.
 
 ### Perfilado
 
-Busca explicar dónde se consume el tiempo:
+Busca explicar en qué se consume el tiempo:
 
 ```text
 CPU de Python
 conversión de tipos
-red o socket
+transferencia del driver
 triggers
 índices
 WAL
@@ -65,34 +61,14 @@ I/O
 esperas de PostgreSQL
 ```
 
-Este hito incluye tiempos por entidad, pero no es todavía un perfilador completo de CPU, memoria, WAL o I/O.
+Este hito es un benchmark con tiempos por entidad. No es todavía un perfilador completo de CPU, memoria, WAL o I/O.
 
-## 3. Qué significa «benchmark documentado»
-
-No basta con guardar una tabla de tiempos. El benchmark del repositorio incluye:
-
-1. Generador de carga determinista.
-2. Dos métodos explícitos.
-3. Igual esquema, datos y reglas para ambos.
-4. Warm-up.
-5. Cinco repeticiones medidas.
-6. Orden alternado AB/BA.
-7. Medición con reloj monotónico de alta resolución.
-8. Verificación del contenido final.
-9. Registro del entorno.
-10. Exportación JSON, CSV y Markdown.
-11. Workflow independiente en GitHub Actions.
-12. Evidencia de referencia versionada.
-13. Declaración de lo que no fue medido.
-
-## 4. El kernel medido
-
-El benchmark no mide todo el pipeline. Mide el núcleo de persistencia gobernada.
+## 3. Métodos comparados
 
 ### Ruta COPY
 
 ```text
-registros sintéticos en memoria
+registros sintéticos
 → row_builder
 → tipos Python
 → COPY FROM STDIN
@@ -106,7 +82,7 @@ registros sintéticos en memoria
 ### Ruta de referencia
 
 ```text
-registros sintéticos en memoria
+registros sintéticos
 → row_builder
 → tipos Python
 → executemany
@@ -115,13 +91,11 @@ registros sintéticos en memoria
 → COMMIT
 ```
 
-Esta comparación intenta aislar la diferencia de estrategia de transferencia y reconciliación.
+`executemany` es la ruta previa de la aplicación. No representa todas las estrategias posibles de batching en PostgreSQL.
 
-## 5. Qué permanece activo
+## 4. Qué permanece activo
 
-Una comparación rápida pero artificial podría desactivar elementos costosos. Aquí no se hace eso.
-
-Permanecen activos:
+La comparación no desactiva elementos costosos para fabricar un resultado favorable. Permanecen activos:
 
 ```text
 foreign keys
@@ -130,46 +104,43 @@ check constraints
 triggers terminológicos
 normalized_concept_id
 record_sha256
-historial patient_history
+patient_history
 protección de eventos inmutables
 source_run_id
 commits durables
 ```
 
-Por eso el resultado describe «carga gobernada» y no solo escritura en una tabla vacía sin reglas.
+Por eso hablamos de **carga gobernada**, no de escritura en una tabla sin reglas.
 
-## 6. Qué se excluye del reloj
+## 5. Qué queda fuera del reloj
 
-Quedan fuera:
+Se excluyen:
 
 ```text
 generación de la población
 captura raw
-hash del archivo raw
 validación contractual
-escritura de archivos valid/invalid
+archivos valid/invalid
 quality report
-registro completo del execution journal
-verificación posterior del contenido
+execution journal completo
+verificación posterior
 serialización de artefactos
 ```
 
-La exclusión evita atribuir a COPY tiempo perteneciente a otras etapas.
+Esto permite aislar el kernel de persistencia, pero limita la conclusión: no puede afirmarse que el pipeline completo mejore en el mismo porcentaje.
 
-También limita la conclusión: no se puede afirmar que el pipeline completo sea 29% más rápido.
+## 6. Carga sintética
 
-## 7. Construcción de la carga sintética
+Cada paciente produce quince filas:
 
-Cada paciente produce quince registros clínicos:
-
-| Entidad | Registros por paciente |
+| Entidad | Filas por paciente |
 |---|---:|
-| Paciente | 1 |
-| Encuentros | 2 |
-| Diagnósticos | 2 |
-| Observaciones | 6 |
-| Medicaciones | 2 |
-| Procedimientos | 2 |
+| patients | 1 |
+| encounters | 2 |
+| diagnoses | 2 |
+| observations | 6 |
+| medications | 2 |
+| procedures | 2 |
 | Total | 15 |
 
 Por tanto:
@@ -180,7 +151,7 @@ Por tanto:
 2 500 pacientes → 37 500 filas
 ```
 
-Las observaciones representan seis filas por paciente porque cada uno tiene dos encuentros y tres mediciones por encuentro:
+Las seis observaciones corresponden a dos encuentros con tres mediciones cada uno:
 
 ```text
 presión sistólica
@@ -188,7 +159,7 @@ presión diastólica
 frecuencia cardiaca
 ```
 
-## 8. Determinismo
+## 7. Determinismo
 
 El generador fija:
 
@@ -197,9 +168,7 @@ seed = 20260729
 reference_date = 2026-07-29
 ```
 
-Una misma combinación de código, seed y número de pacientes produce el mismo contenido lógico y el mismo fingerprint de workload.
-
-Los fingerprints de la ejecución de referencia fueron:
+La misma versión de código, seed y tamaño produce el mismo contenido lógico y fingerprint de workload.
 
 | Pacientes | Fingerprint del workload |
 |---:|---|
@@ -207,36 +176,31 @@ Los fingerprints de la ejecución de referencia fueron:
 | 1 000 | `f94c3726aa7c95b53da035b807c12f6dae70455bafad7e2e334621b43956ccea` |
 | 2 500 | `fc6e01c7309147a1eab076d86834970ebcd19446a904fdb8b6ec0aa1fc79194f` |
 
-Un fingerprint no demuestra que el dataset sea clínicamente representativo. Solo identifica el contenido exacto generado por ese protocolo.
+El fingerprint identifica contenido; no demuestra representatividad clínica.
 
-## 9. Warm-up
+## 8. Warm-up
 
-La primera ejecución puede pagar costes que las siguientes no pagan de la misma forma:
+La primera ejecución puede pagar costes de inicialización distintos:
 
 ```text
 carga de módulos
-creación de conexiones internas
-compilación o preparación de rutas
-páginas no presentes en caché
+preparación de rutas
+páginas fuera de caché
 inicialización de estructuras
 ```
 
-Por eso se ejecuta una repetición de calentamiento por método y tamaño. Su resultado se descarta de los agregados.
+Se ejecuta un calentamiento por método y tamaño. Su tiempo no entra en los agregados.
 
-Warm-up no significa modificar manualmente los resultados. Es una fase declarada del protocolo.
+## 9. Por qué se usan seis repeticiones
 
-## 10. Alternancia AB/BA
-
-Un diseño ingenuo sería:
+Con dos métodos y orden alternado, un número impar produce desequilibrio. Cinco repeticiones darían:
 
 ```text
-COPY cinco veces
-luego executemany cinco veces
+COPY primero: 3 veces
+executemany primero: 2 veces
 ```
 
-Ese orden puede favorecer a uno de los métodos por cambios temporales del runner.
-
-El benchmark alterna:
+El protocolo definitivo usa seis:
 
 ```text
 R1: COPY → executemany
@@ -244,11 +208,36 @@ R2: executemany → COPY
 R3: COPY → executemany
 R4: executemany → COPY
 R5: COPY → executemany
+R6: executemany → COPY
 ```
 
-Así ambos métodos aparecen primero y segundo durante la serie.
+Así cada método aparece primero tres veces y segundo tres veces. La CLI rechaza cantidades impares.
 
-## 11. Reloj utilizado
+## 10. Seguridad de la base de datos
+
+El benchmark elimina el estado de la plataforma entre trials. Por eso exige:
+
+```text
+--allow-destructive-reset
+```
+
+La confirmación no es la única defensa. Después de migrar, la CLI inspecciona todas las tablas base de:
+
+```text
+audit
+clinical
+analytics
+```
+
+Si alguna contiene filas, el benchmark se detiene. No intenta distinguir datos de prueba de datos valiosos.
+
+La regla operativa es:
+
+```text
+usar una base dedicada, vacía y descartable
+```
+
+## 11. Reloj
 
 El código usa:
 
@@ -256,56 +245,50 @@ El código usa:
 perf_counter_ns()
 ```
 
-Es apropiado para intervalos porque es monotónico: no retrocede por ajustes del reloj del sistema.
-
-La conversión es:
+Es monotónico y apropiado para intervalos.
 
 ```text
 elapsed_ms = (fin_ns - inicio_ns) / 1 000 000
 ```
 
-No se utiliza `datetime.now()` para calcular duración. `datetime` se usa para sellar el momento de generación del reporte, no para medir intervalos.
+`datetime.now()` se usa para fechar el reporte, no para medir duración.
 
 ## 12. Throughput
-
-La tasa se calcula como:
 
 ```text
 rows_per_second = total_rows / elapsed_seconds
 ```
 
-Ejemplo con 37 500 filas y 6.465960 segundos:
+Ejemplo:
 
 ```text
-37 500 / 6.465960 ≈ 5 799.6 filas/s
+37 500 filas / 7.936444 s ≈ 4 725.0 filas/s
 ```
 
-Esta tasa incluye entidades con distinta complejidad. No debe interpretarse como una tasa uniforme de «registros hospitalarios».
+La tasa mezcla entidades con diferente coste. No equivale a pacientes por segundo.
 
-## 13. Mediana y media
+## 13. Mediana, media y variabilidad
 
-### Media
+La media usa todos los tiempos y es sensible a outliers.
 
-Suma todos los tiempos y divide por el número de repeticiones.
-
-Es sensible a una ejecución anormalmente lenta.
-
-### Mediana
-
-Ordena los cinco tiempos y toma el valor central.
-
-Con cinco observaciones:
+Con seis repeticiones ordenadas:
 
 ```text
-t1 ≤ t2 ≤ t3 ≤ t4 ≤ t5
-mediana = t3
+t1 ≤ t2 ≤ t3 ≤ t4 ≤ t5 ≤ t6
+mediana = (t3 + t4) / 2
 ```
 
-El benchmark usa la mediana para la comparación principal, pero conserva media, desviación estándar, mínimo y máximo.
+El benchmark usa la mediana como cifra principal, pero conserva:
+
+```text
+media
+desviación estándar
+mínimo
+máximo
+mediana
+```
 
 ## 14. Speedup
-
-La aceleración se define como:
 
 ```text
 speedup = mediana_executemany / mediana_COPY
@@ -314,95 +297,82 @@ speedup = mediana_executemany / mediana_COPY
 Para 2 500 pacientes:
 
 ```text
-9 176.855 ms / 6 465.960 ms ≈ 1.419
+10 955.541 / 7 936.444 ≈ 1.380×
 ```
 
-Interpretación:
+No debe expresarse como «138% más rápido».
+
+## 15. Reducción de tiempo
 
 ```text
-COPY fue aproximadamente 1.419 veces tan rápido
+reducción = (1 - COPY / executemany) × 100
 ```
 
-No significa que «COPY fue 141.9% más rápido».
-
-## 15. Reducción del tiempo
-
-La reducción relativa es:
+Para el mismo tamaño:
 
 ```text
-reducción = (1 - mediana_COPY / mediana_executemany) × 100
+(1 - 7 936.444 / 10 955.541) × 100 ≈ 27.56%
 ```
 
-Para 2 500 pacientes:
-
-```text
-(1 - 6 465.960 / 9 176.855) × 100 ≈ 29.54%
-```
-
-Speedup y reducción expresan la misma comparación con escalas diferentes.
-
-## 16. Resultados de referencia
+## 16. Resultado equilibrado de referencia
 
 | Pacientes | Filas | COPY | `executemany` | Speedup | Reducción |
 |---:|---:|---:|---:|---:|---:|
-| 250 | 3 750 | 671.737 ms | 928.806 ms | 1.383× | 27.68% |
-| 1 000 | 15 000 | 2 615.950 ms | 3 693.506 ms | 1.412× | 29.17% |
-| 2 500 | 37 500 | 6 465.960 ms | 9 176.855 ms | 1.419× | 29.54% |
+| 250 | 3 750 | 825.694 ms | 1 083.028 ms | 1.312× | 23.76% |
+| 1 000 | 15 000 | 3 183.671 ms | 4 341.867 ms | 1.364× | 26.68% |
+| 2 500 | 37 500 | 7 936.444 ms | 10 955.541 ms | 1.380× | 27.56% |
 
-La ventaja fue consistente en los tres tamaños y aumentó ligeramente con la carga.
+La ventaja fue consistente y aumentó con el tamaño dentro de este rango.
 
 ## 17. Verificación de equivalencia
 
-Medir dos métodos sin verificar el resultado podría premiar al método que omitió trabajo.
-
-Después de cada trial se comprueba:
+Un método podría parecer más rápido porque omitió trabajo. Después de cada trial se comprueba:
 
 ```text
 conteo de cada tabla
-conteo del historial
-filas current del historial
-conteo de códigos normalizados
-hashes record_sha256 ordenados
-fingerprint combinado de base de datos
+conteo de patient_history
+filas is_current
+conteo terminológico
+record_sha256 ordenados
+fingerprint combinado de base
 ```
 
-Los diez trials de cada tamaño deben generar el mismo fingerprint.
+Los doce trials de cada tamaño deben producir el mismo fingerprint:
 
-Esto confirma igualdad dentro de las propiedades verificadas. No constituye una demostración formal de equivalencia de todos los estados posibles.
+| Pacientes | Fingerprint de base gobernada |
+|---:|---|
+| 250 | `d8774d0544ed3e54645ab416d457bc71d148de15d82b998b397cfaa287ba6671` |
+| 1 000 | `0de3fb68be7f9d01ddc6cf6d7ce929ecf7c15c1f1b8a5bd0f4d780b633cf8b2a` |
+| 2 500 | `c224fd2dac09e27af51186c2986d3efb05a305fb0d68a8356b8af6061821a8e7` |
 
-## 18. Por qué el fingerprint del workload y el de la base son distintos
+## 18. Workload fingerprint y database fingerprint
 
 ### Workload fingerprint
 
-Identifica los registros sintéticos de entrada.
+Identifica la entrada sintética.
 
 ### Database-content fingerprint
 
-Identifica el contenido gobernado producido después de:
+Identifica la salida después de:
 
 ```text
 conversión de tipos
 triggers
-hashes de registros
-normalización terminológica
+hashes
+terminología
 historial
 ```
 
-Separarlos permite detectar:
+Separarlos permite detectar misma entrada con salida distinta.
 
-```text
-misma entrada, salida diferente
-entrada diferente, salida aparentemente igual
-```
+## 19. Entorno registrado
 
-## 19. Entorno de referencia
-
-La medición depende del entorno. La referencia registró:
+La referencia se ejecutó con:
 
 ```text
 GitHub Actions
 4 CPU lógicas visibles
-AMD EPYC 9V74
+AMD EPYC 7763
 ~16.77 GB RAM visible
 Python 3.11.15
 PostgreSQL 16.14
@@ -413,54 +383,32 @@ synchronous_commit = on
 wal_level = replica
 ```
 
-El nombre «80-Core Processor» pertenece al modelo del host. El job disponía de cuatro CPU lógicas, no de ochenta cores exclusivos.
+El nombre «64-Core Processor» describe el modelo del host. El job veía cuatro CPU lógicas, no sesenta y cuatro cores exclusivos.
 
-## 20. Variabilidad
+## 20. Evidencia anterior y por qué no es la referencia
 
-La ejecución de referencia no fue la única.
+Una corrida previa usó cinco repeticiones y observó aceleraciones alrededor de 1.38–1.42×. Está preservada por trazabilidad, pero COPY ocupaba la primera posición tres veces y la referencia solo dos.
 
-Una corrida anterior observó:
-
-| Pacientes | Speedup anterior | Speedup referencia |
-|---:|---:|---:|
-| 250 | 1.380× | 1.383× |
-| 1 000 | 1.407× | 1.412× |
-| 2 500 | 1.423× | 1.419× |
-
-La cercanía es tranquilizadora, pero dos corridas no describen toda la variabilidad futura de GitHub Actions.
+No se borró ni se ocultó. Se clasificó como evidencia supersedida y se repitió el experimento con orden equilibrado.
 
 ## 21. Por qué no se reporta memoria máxima
 
-`tracemalloc` mide asignaciones administradas por Python. No captura de forma completa:
+`tracemalloc` no captura de forma completa:
 
 ```text
-memoria del proceso PostgreSQL
-buffers del driver nativo
+proceso PostgreSQL
+buffers nativos de psycopg
 kernel y page cache
-memoria del contenedor de servicio
+contenedor de servicio
 ```
 
-Reportar solo memoria Python como «memoria total» sería engañoso.
+Presentar memoria Python como memoria total sería engañoso.
 
-Una comparación de memoria responsable requeriría medición coordinada de procesos y contenedores, por ejemplo con límites y métricas del sistema operativo.
+## 22. Por qué no hay intervalos de confianza
 
-## 22. Por qué no se usan intervalos de confianza
+Seis repeticiones ofrecen evidencia descriptiva, no inferencia estadística robusta sobre infraestructura compartida. Se reportan mediana y dispersión, sin p-values ni intervalos que aparenten más certeza.
 
-Cinco repeticiones permiten una descripción básica, pero no bastan para hacer inferencia estadística robusta sobre una población estable de tiempos, especialmente en infraestructura compartida.
-
-El reporte usa:
-
-```text
-mediana
-media
-desviación estándar
-mínimo
-máximo
-```
-
-No presenta p-values ni intervalos de confianza que aparenten más certeza de la disponible.
-
-## 23. Cómo ejecutar el benchmark
+## 23. Cómo ejecutarlo
 
 PowerShell:
 
@@ -471,26 +419,27 @@ docker compose up -d postgres
 $env:DATABASE_URL = "postgresql://clinical_user:clinical_password@localhost:5432/clinical_data"
 
 clinical-data-benchmark `
+    --allow-destructive-reset `
     --patients 250 1000 2500 `
-    --repetitions 5 `
+    --repetitions 6 `
     --warmups 1 `
     --seed 20260729 `
     --output-dir data/benchmarks/loading
 ```
 
-Advertencia operativa:
+También puede usarse:
 
-```text
-el benchmark elimina el estado de las tablas de la plataforma antes de cada trial
+```powershell
+.\scripts\run_benchmark.ps1
 ```
 
-Debe ejecutarse en una base aislada y descartable.
+El comando fallará si encuentra cualquier fila en los schemas gobernados.
 
-## 24. Artefactos generados
+## 24. Artefactos
 
 ### `benchmark-results.json`
 
-Contiene el documento completo y legible por máquinas:
+Documento completo legible por máquinas:
 
 ```text
 configuración
@@ -504,124 +453,122 @@ límites
 
 ### `benchmark-trials.csv`
 
-Una fila por trial, útil para R, Python, Excel o análisis adicional.
+Una fila por trial para análisis en R, Python o una hoja de cálculo.
 
 ### `benchmark-summary.md`
 
-Resumen legible en GitHub y en el Step Summary del workflow.
+Resumen para GitHub y revisión humana.
 
 ## 25. Evidencia permanente
 
-La referencia está en:
-
 ```text
-benchmarks/loading/github-actions-run-30466706538/
+benchmarks/loading/github-actions-run-30470147850/
+├── benchmark-summary.md
+├── benchmark-trials.csv
+└── reference-run.json
 ```
 
-El directorio conserva:
+`reference-run.json` conserva:
 
 ```text
-benchmark-summary.md
-benchmark-trials.csv
-reference-run.json
+workflow run ID
+head SHA
+artifact ID y digest
+hashes de archivos originales
+configuración
+entorno
+agregados
+comparaciones
+límites
 ```
-
-`reference-run.json` añade el ID del workflow, ID y digest del artifact, SHA del head y hashes de los archivos fuente del artifact.
 
 ## 26. Workflow dedicado
-
-Archivo:
 
 ```text
 .github/workflows/benchmark.yml
 ```
 
-Se separa del CI ordinario porque un benchmark completo:
+Se separa del CI ordinario porque el benchmark completo:
 
 ```text
 tarda más
 consume más base de datos
-puede variar por infraestructura
-no debe bloquear cambios de documentación no relacionados
+varía con la infraestructura
+no debe ejecutarse por cambios no relacionados
 ```
 
-El CI ordinario conserva un benchmark pequeño como prueba de integración. El workflow dedicado genera la evidencia de rendimiento.
+El CI normal ejecuta un benchmark pequeño de integración. El workflow dedicado genera la evidencia de rendimiento.
 
-## 27. Qué afirmación sí está respaldada
+## 27. Afirmación respaldada
 
-La formulación responsable es:
-
-> En el entorno registrado de GitHub Actions, para cargas iniciales deterministas de 3 750 a 37 500 filas sobre el esquema gobernado de seis entidades, COPY con staging temporal y merge redujo la mediana de tiempo entre 27.68% y 29.54% frente a la ruta previa basada en `executemany`.
+> En el entorno registrado de GitHub Actions, para cargas iniciales deterministas de 3 750 a 37 500 filas sobre el esquema gobernado de seis entidades, COPY con staging temporal y merge redujo la mediana de tiempo entre 23.76% y 27.56% frente a la ruta previa basada en `executemany`.
 
 ## 28. Afirmaciones no respaldadas
 
-No debe afirmarse:
-
 ```text
-COPY siempre es 30% más rápido.
-Todo el pipeline mejoró 30%.
+COPY siempre es 25% más rápido.
+Todo el pipeline mejoró 25%.
 El sistema soporta producción hospitalaria.
-El sistema cargará millones de filas a la misma tasa.
-La memoria disminuyó 30%.
-La ventaja será igual con PostgreSQL remoto.
-La ventaja será igual con múltiples escritores.
+La tasa será igual con millones de filas.
+La memoria disminuyó en un porcentaje conocido.
+El resultado será igual con PostgreSQL remoto.
+El resultado será igual con múltiples escritores.
 ```
 
-## 29. Ejercicios de comprensión
+## 29. Limitaciones
+
+1. GitHub Actions es infraestructura compartida.
+2. Seis repeticiones siguen siendo pocas para inferencia formal.
+3. Solo se miden inserciones iniciales.
+4. Hay un solo escritor.
+5. PostgreSQL está en un contenedor local.
+6. La carga es sintética y regular.
+7. El máximo es 37 500 filas.
+8. Validación y auditoría completa están fuera del reloj.
+9. No se mide memoria total.
+10. No se miden bytes de WAL, CPU ni I/O.
+
+## 30. Ejercicios
 
 ### Ejercicio 1
 
-Explica por qué desactivar triggers haría la comparación menos relevante para esta plataforma.
+Explica por qué desactivar triggers haría la comparación menos útil.
 
 ### Ejercicio 2
 
-Calcula el speedup para:
+Para COPY = 2.4 s y referencia = 3.6 s:
 
 ```text
-COPY = 2.4 s
-referencia = 3.6 s
-```
-
-Resultado esperado:
-
-```text
-3.6 / 2.4 = 1.5×
+speedup = 3.6 / 2.4 = 1.5×
+reducción = (1 - 2.4 / 3.6) × 100 = 33.33%
 ```
 
 ### Ejercicio 3
 
-Calcula la reducción del tiempo para el mismo ejemplo.
-
-```text
-(1 - 2.4 / 3.6) × 100 = 33.33%
-```
+Explica por qué cinco repeticiones no equilibran AB/BA y seis sí.
 
 ### Ejercicio 4
 
-Describe una situación en la que alternar AB/BA no eliminaría el sesgo por completo.
-
-Ejemplos válidos:
+Describe un caso en el que alternar el orden no elimine toda la variabilidad:
 
 ```text
-contención externa que cambia abruptamente
 thermal throttling
+contención externa repentina
 mantenimiento del host
-una caché que nunca vuelve al mismo estado
+caché no reproducible
 ```
 
 ### Ejercicio 5
 
-¿Por qué una tasa de 5 800 filas/s no implica que 5 800 pacientes/s puedan procesarse?
+¿Por qué 4 725 filas/s no significa 4 725 pacientes/s?
 
-Porque un paciente genera quince filas y las entidades tienen costes diferentes.
+Porque cada paciente genera quince filas y cada entidad tiene costes distintos.
 
 ### Ejercicio 6
 
-Diseña un perfil adicional para estudiar actualizaciones de pacientes y conflictos de eventos sin mezclarlo con el benchmark de carga inicial.
+Diseña un perfil separado para estudiar actualizaciones o conflictos inmutables sin mezclarlos con carga inicial.
 
-## 30. Lectura recomendada del código
-
-Orden sugerido:
+## 31. Lectura recomendada del código
 
 ```text
 1. BenchmarkConfiguration
@@ -639,4 +586,4 @@ Orden sugerido:
 13. tests/test_benchmark.py
 ```
 
-La idea central es que rendimiento y corrección se miden juntos: ningún tiempo se publica sin verificar primero que ambos métodos dejaron el mismo contenido gobernado.
+La idea central es que rendimiento y corrección se validan juntos: ningún tiempo se publica sin verificar que ambos métodos dejaron el mismo contenido gobernado.
