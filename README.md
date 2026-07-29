@@ -1,8 +1,8 @@
 # Clinical Data Platform
 
-> Status: active development toward `1.0.0` — version `0.8.0` completes the six-entity clinical model.
+> Status: active development toward `1.0.0` — version `0.9.0` adds minimal clinical terminology normalization.
 
-Clinical Data Platform is a synthetic clinical data engineering project that demonstrates how healthcare-like source files can become auditable, analysis-ready datasets.
+Clinical Data Platform is a synthetic clinical data engineering project that demonstrates how healthcare-like source files can become auditable, analysis-ready, terminology-linked datasets.
 
 The repository uses only synthetic data. It is intended for engineering review and learning, not for identifiable patient data, clinical decisions, or production healthcare deployment.
 
@@ -27,7 +27,13 @@ Generic validation pipeline
         └── quality report
         │
         ▼
-Formal PostgreSQL migrations
+Formal PostgreSQL migrations V001–V007
+        │
+        ▼
+Terminology resolution
+        ├── source-system aliases
+        ├── active concepts by domain
+        └── reviewed local-to-standard mappings
         │
         ▼
 Hybrid clinical persistence
@@ -55,60 +61,96 @@ patients
 |---|---|---|
 | patients | current snapshot + SCD Type 2 history | `patient_id` |
 | encounters | immutable event | `encounter_id` |
-| diagnoses | immutable event | `diagnosis_id` |
-| observations | immutable event | `observation_id` |
-| medications | immutable event | `medication_id` |
-| procedures | immutable event | `procedure_id` |
+| diagnoses | immutable event + terminology binding | `diagnosis_id` |
+| observations | immutable event + terminology binding | `observation_id` |
+| medications | immutable event + terminology binding | `medication_id` |
+| procedures | immutable event + terminology binding | `procedure_id` |
 
 Every event references a patient and encounter. PostgreSQL foreign keys reject orphaned events.
 
-Exact event duplicates are no-ops that preserve original lineage. Reusing an event identifier with different business content raises an integrity error and rolls back the complete dataset load.
+Exact event duplicates preserve the original row and lineage. Reusing an event identifier with different business content raises an integrity error and rolls back the complete dataset load.
 
-## Medication model
+## Minimal terminology layer
 
-Medication events include:
-
-```text
-medication_id
-patient_id
-encounter_id
-code_system
-medication_code
-status
-start_datetime
-end_datetime
-dose_value
-dose_unit
-route
-source_system
-```
-
-The executable contract accepts `RXNORM` and `ATC` as declared code-system names. It validates status, route, types, and temporal order. PostgreSQL additionally enforces foreign keys, positive dose, paired dose value/unit, record hashing, and immutability.
-
-## Procedure model
-
-Procedure events include:
+V007 creates:
 
 ```text
-procedure_id
-patient_id
-encounter_id
-code_system
-procedure_code
-procedure_datetime
-status
-source_system
+terminology.code_systems
+terminology.system_aliases
+terminology.concepts
+terminology.concept_mappings
+terminology.normalized_clinical_codes
 ```
 
-The contract accepts `SNOMED`, `CPT`, and `ICD10PCS` as declared code-system names. It does not yet validate individual codes against external terminology releases.
+The installed subset registers:
+
+```text
+ICD10CM
+LOINC
+RXNORM
+ATC
+SNOMEDCT
+CPT
+ICD10PCS
+LOCAL_OBSERVATION
+```
+
+External systems are represented by small local subsets. They are not complete releases.
+
+### Source and normalized representations
+
+The source representation remains in the clinical row:
+
+```text
+LOCAL_OBSERVATION:SYSTOLIC_BP
+```
+
+The row also receives a foreign key to its normalized concept:
+
+```text
+LOINC:8480-6 — Systolic blood pressure
+```
+
+Bundled mappings:
+
+| Local source code | Normalized system | Normalized code |
+|---|---|---|
+| `SYSTOLIC_BP` | LOINC | `8480-6` |
+| `DIASTOLIC_BP` | LOINC | `8462-4` |
+| `HEART_RATE` | LOINC | `8867-4` |
+
+### Strict terminology boundary
+
+A coded row can pass its file contract but fail persistence when:
+
+- its system has no registered alias;
+- its code is absent from the installed subset;
+- its concept is inactive;
+- its concept belongs to the wrong domain.
+
+The complete dataset transaction then rolls back. Raw and processed artifacts remain available for investigation.
+
+### Verification and licensing
+
+Concept entries have one of three local statuses:
+
+```text
+verified
+curated
+unverified
+```
+
+The repository does not redistribute complete terminology releases. CPT descriptors are deliberately omitted, SNOMED CT entries remain subject to applicable licensing, and every external system is marked as an incomplete subset.
+
+See [`docs/terminology.md`](docs/terminology.md) for the precise boundary.
 
 ## Clinical history policy
 
-Every current clinical row has a `record_sha256` calculated from normalized business content. Lineage fields are excluded so that re-receiving the same content does not create a false change.
+Every current clinical row has a `record_sha256` calculated from normalized business content. Lineage and terminology foreign keys are excluded so that operational metadata does not create false clinical changes.
 
 Patient demographic changes close the prior row in `clinical.patient_history` and append a new current version. Encounter, diagnosis, observation, medication, and procedure events are immutable.
 
-The policy is declared in `src/clinical_data_platform/history.py` and enforced by migrations V005 and V006.
+The policy is declared in `src/clinical_data_platform/history.py` and enforced by PostgreSQL triggers.
 
 ## Immutable raw landing zone
 
@@ -120,7 +162,7 @@ data/raw/
 └── receipts/<dataset>/<YYYY>/<MM>/<DD>/<receipt-uuid>.json
 ```
 
-Identical files share one content object, while each reception receives a separate append-only receipt. The local implementation provides checksum verification, content deduplication, staging, atomic publication, no application-level replacement, read-only permissions, path-traversal protection, and lineage verification.
+Identical files share one content object, while each reception receives a separate append-only receipt. The implementation verifies checksums, byte sizes, paths, and manifest lineage before persistence.
 
 This is application-level local immutability, not certified WORM storage.
 
@@ -142,7 +184,9 @@ contracts/
 └── procedures/v1.0.0.toml
 ```
 
-The contract engine executes structural, required-value, uniqueness, type, categorical, temporal, unit, and plausible-range rules. Each validation run records contract path, semantic version, and SHA-256.
+The contract engine executes structural, required-value, uniqueness, type, categorical, temporal, unit, and plausible-range rules. Each validation run records contract path, version, and SHA-256.
+
+Contracts define the accepted source interface. PostgreSQL terminology resolution determines whether coded values are recognized by the installed terminology subset.
 
 ## PostgreSQL migrations
 
@@ -153,7 +197,8 @@ migrations/
 ├── V003__add_contract_lineage.sql
 ├── V004__add_raw_landing_lineage.sql
 ├── V005__add_clinical_history_policy.sql
-└── V006__add_medications_and_procedures.sql
+├── V006__add_medications_and_procedures.sql
+└── V007__add_minimal_clinical_terminologies.sql
 ```
 
 Migration history is stored in `public.schema_migrations`. The engine verifies contiguous ordering, names, checksums, detected structure, pending versions, and downgrade attempts. Migrations execute transactionally under a PostgreSQL advisory lock.
@@ -161,9 +206,13 @@ Migration history is stored in `public.schema_migrations`. The engine verifies c
 ## Implemented capabilities
 
 - six contract-governed clinical datasets;
+- minimal versioned terminology registry;
+- source-system aliases and normalized clinical concepts;
+- reviewed mappings from local observations to LOINC;
+- strict rejection of unknown, inactive, or wrong-domain codes;
 - immutable content-addressed raw capture and append-only receipts;
 - normalized validation errors and rejected-record quarantine;
-- source, raw, contract, run, record, and cohort lineage;
+- source, raw, contract, run, record, terminology, and cohort lineage;
 - formal PostgreSQL install, upgrade, baseline, and drift checks;
 - current patient snapshot plus SCD Type 2 history;
 - immutable clinical-event conflict protection;
@@ -194,7 +243,7 @@ POSIX shell:
 sh scripts/run_demo.sh
 ```
 
-The demo captures, validates, migrates, persists, builds the hypertension cohort, and writes:
+The demo captures, validates, migrates, normalizes coded concepts, persists, builds the hypertension cohort, and writes:
 
 ```text
 data/raw/
@@ -218,37 +267,68 @@ clinical-data database-validate
 clinical-data run-demo --repository-root .
 ```
 
-## Expected bundled sample
+A current database reports:
 
-| Dataset | Received | Valid | Invalid | Errors | Contract |
-|---|---:|---:|---:|---:|---:|
-| Patients | 8 | 5 | 3 | 3 | 1.0.0 |
-| Encounters | 8 | 7 | 1 | 1 | 1.0.0 |
-| Diagnoses | 7 | 6 | 1 | 2 | 1.0.0 |
-| Observations | 14 | 13 | 1 | 1 | 1.0.0 |
-| Medications | 7 | 6 | 1 | 1 | 1.0.0 |
-| Procedures | 7 | 6 | 1 | 1 | 1.0.0 |
-
-The default hypertension cohort contains `P001` and `P002`.
-
-## Review entity counts
-
-```sql
-SELECT 'patients' AS dataset, COUNT(*) FROM clinical.patients
-UNION ALL
-SELECT 'encounters', COUNT(*) FROM clinical.encounters
-UNION ALL
-SELECT 'diagnoses', COUNT(*) FROM clinical.diagnoses
-UNION ALL
-SELECT 'observations', COUNT(*) FROM clinical.observations
-UNION ALL
-SELECT 'medications', COUNT(*) FROM clinical.medications
-UNION ALL
-SELECT 'procedures', COUNT(*) FROM clinical.procedures
-ORDER BY dataset;
+```text
+detected=7
+current=7
+latest=7
+pending=[]
 ```
 
-Expected counts after a clean demo: 5 patients, 7 encounters, 6 diagnoses, 13 observations, 6 medications, and 6 procedures.
+## Expected bundled sample
+
+| Dataset | Received | Valid | Invalid | Persisted |
+|---|---:|---:|---:|---:|
+| Patients | 8 | 5 | 3 | 5 |
+| Encounters | 8 | 7 | 1 | 7 |
+| Diagnoses | 7 | 6 | 1 | 6 |
+| Observations | 14 | 13 | 1 | 13 |
+| Medications | 7 | 6 | 1 | 6 |
+| Procedures | 7 | 6 | 1 | 6 |
+
+The four coded event tables produce 31 normalized terminology bindings. The default hypertension cohort contains `P001` and `P002`.
+
+## Inspect normalized codes
+
+```sql
+SELECT
+    dataset_name,
+    entity_id,
+    source_system,
+    source_code,
+    normalized_system,
+    normalized_code,
+    normalized_display,
+    domain,
+    verification_status
+FROM terminology.normalized_clinical_codes
+ORDER BY dataset_name, entity_id;
+```
+
+## Python terminology API
+
+```python
+from clinical_data_platform.terminology import (
+    list_terminology_systems,
+    resolve_terminology_concept,
+    validate_terminology_bindings,
+)
+```
+
+Example:
+
+```python
+concept = resolve_terminology_concept(
+    connection,
+    "LOCAL_OBSERVATION",
+    "SYSTOLIC_BP",
+    "observation",
+)
+
+assert concept.code_system_id == "LOINC"
+assert concept.code == "8480-6"
+```
 
 ## Quality checks
 
@@ -262,7 +342,7 @@ python -m pytest --cov=clinical_data_platform --cov-report=term-missing
 docker build --tag clinical-data-platform:local .
 ```
 
-CI exercises contract validation, migrations, raw capture, patient history, all six entities, immutable-event rollback, cohort generation, and container smoke tests.
+CI exercises contracts, V001–V007 migrations, raw capture, patient history, all six entities, terminology resolution and rejection, immutable-event rollback, cohort generation, and container smoke tests.
 
 ## Documentation
 
@@ -270,20 +350,23 @@ CI exercises contract validation, migrations, raw capture, patient history, all 
 - [`docs/database.md`](docs/database.md): migrations, persistence, and lineage;
 - [`docs/clinical-history-policy.md`](docs/clinical-history-policy.md): snapshot and immutable-event policy;
 - [`docs/clinical-entities.md`](docs/clinical-entities.md): six-entity model;
+- [`docs/terminology.md`](docs/terminology.md): terminology model, mappings, and licensing boundary;
 - [`docs/analysis-guide.md`](docs/analysis-guide.md): review sequence and SQL;
-- [`docs/learning/six-clinical-entities-es.md`](docs/learning/six-clinical-entities-es.md): detailed Spanish study guide;
+- [`docs/learning/minimal-clinical-terminologies-es.md`](docs/learning/minimal-clinical-terminologies-es.md): detailed Spanish study guide;
 - additional learning guides under [`docs/learning/`](docs/learning/).
 
 ## Current limitations
 
 The repository is not yet version `1.0.0`. Remaining milestones include:
 
-- terminology normalization;
 - complete execution states and structured logging;
 - reproducible Synthea datasets;
 - bulk PostgreSQL `COPY` loading and benchmarks;
 - an additional cohort with attrition and missingness reporting;
-- stronger coverage, multi-version CI, security, container, and release hardening.
+- coverage of at least 90%;
+- multi-version CI, security, container, and release hardening.
+
+The terminology layer remains a small local subset. It does not provide complete releases, automated synchronization, hierarchy queries, UCUM normalization, multilingual terms, FHIR terminology operations, or clinical validation of code selection.
 
 The project intentionally excludes identifiable patient data, production decision support, enterprise authentication, and regulatory deployment claims.
 

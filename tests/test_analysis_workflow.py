@@ -12,6 +12,7 @@ from clinical_data_platform.migration import migrate_database
 from clinical_data_platform.pipeline import run_dataset_validation
 from clinical_data_platform.raw import verify_raw_receipt
 from clinical_data_platform.registry import dataset_names
+from clinical_data_platform.terminology import validate_terminology_bindings
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_DIRECTORY = REPOSITORY_ROOT / "data" / "sample"
@@ -51,6 +52,7 @@ def test_full_clinical_pipeline_builds_expected_hypertension_features(
         )
         for dataset in dataset_names()
     }
+    terminology = validate_terminology_bindings(connection)
     cohort = build_hypertension_cohort(
         connection,
         COHORT_SQL_PATH,
@@ -70,6 +72,14 @@ def test_full_clinical_pipeline_builds_expected_hypertension_features(
         """,
         (cohort.cohort_run_id,),
     ).fetchall()
+    systolic_concept = connection.execute(
+        """
+        SELECT normalized_system, normalized_code
+        FROM terminology.normalized_clinical_codes
+        WHERE dataset_name = 'observations'
+          AND entity_id = 'O001'
+        """
+    ).fetchone()
 
     assert loads["patients"].run_id == summaries["patients"].run_id
     assert loads["patients"].records_upserted == 5
@@ -78,6 +88,9 @@ def test_full_clinical_pipeline_builds_expected_hypertension_features(
     assert loads["observations"].records_upserted == 13
     assert loads["medications"].records_upserted == 6
     assert loads["procedures"].records_upserted == 6
+    assert terminology.normalized_clinical_rows == 31
+    assert terminology.invalid_bindings == 0
+    assert systolic_concept == ("LOINC", "8480-6")
     assert cohort.row_count == 2
     assert feature_rows == [
         ("P001", 146.0, 92.0, 95),

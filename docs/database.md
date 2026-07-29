@@ -12,6 +12,9 @@ contract.py
 migration.py
     → ordered database structure
 
+terminology.py
+    → terminology inspection and binding validation
+
 history.py
     → declared snapshot/event semantics
 
@@ -22,7 +25,7 @@ database.py
     → lineage verification and transactional loading
 
 PostgreSQL
-    → foreign keys, constraints, hashes, history, immutability
+    → foreign keys, concepts, hashes, history, immutability, rollback
 ```
 
 ## Migration history
@@ -34,65 +37,108 @@ V003 contract lineage
 V004 raw lineage
 V005 patient SCD2 and immutable-event enforcement
 V006 medications and procedures
+V007 minimal clinical terminologies
 ```
 
 `public.schema_migrations` stores version, name, checksum, application version, execution type, timestamp, and duration. Applied files are immutable.
 
-## V006
+## V007 terminology schema
 
-V006 adds:
-
-- `clinical.medications`;
-- `clinical.procedures`;
-- normalized record-hash functions;
-- immutable-event triggers;
-- patient and encounter foreign keys;
-- temporal, categorical, dose, and non-empty-value constraints;
-- patient, encounter, code, and time indexes;
-- complete V006 schema detection for baseline and drift checks.
-
-## Six current clinical tables
+V007 creates:
 
 ```text
-clinical.patients
-clinical.encounters
+terminology.code_systems
+terminology.system_aliases
+terminology.concepts
+terminology.concept_mappings
+terminology.normalized_clinical_codes
+```
+
+It also adds `normalized_concept_id` to:
+
+```text
 clinical.diagnoses
 clinical.observations
 clinical.medications
 clinical.procedures
 ```
 
-`clinical.patient_history` separately stores patient SCD Type 2 versions.
+Each column is `NOT NULL` and references `terminology.concepts`.
 
-## Medication constraints
+## Resolution function
 
-PostgreSQL enforces:
+```sql
+terminology.resolve_concept(
+    p_source_system,
+    p_source_code,
+    p_expected_domain
+)
+```
 
-- patient and encounter existence;
-- `RXNORM` or `ATC` as the declared system name;
-- `ACTIVE`, `COMPLETED`, or `STOPPED` status;
-- end time not earlier than start time;
-- positive dose when present;
-- dose value and unit supplied together;
-- supported route when present;
-- non-empty source and code;
-- immutable identity/content behavior.
+The function:
 
-## Procedure constraints
+1. requires non-empty system and code;
+2. resolves the system alias;
+3. locates the source concept;
+4. follows an optional concept mapping;
+5. requires an active target;
+6. checks the clinical domain;
+7. returns the normalized concept identifier.
 
-PostgreSQL enforces:
+Failures use PostgreSQL integrity errors so the dataset transaction rolls back.
 
-- patient and encounter existence;
-- `SNOMED`, `CPT`, or `ICD10PCS` as the declared system name;
-- `COMPLETED`, `IN_PROGRESS`, or `NOT_DONE` status;
-- non-empty code and source;
-- immutable identity/content behavior.
+## Trigger order
 
-These checks do not prove that an individual code exists in an official terminology release.
+Terminology triggers are installed as `trg_00_*_terminology` and run before the existing immutable-event guards.
+
+```text
+incoming coded row
+→ assign normalized_concept_id
+→ calculate/check business-record hash
+→ insert, no-op, or reject conflict
+```
+
+The normalized foreign key is not part of `record_sha256`. The source system and source code remain the stable business representation used by immutable-event comparison.
+
+## Upgrade from V006
+
+A V006 database may already contain codes that were accepted before terminology enforcement.
+
+V007:
+
+1. installs the curated subset;
+2. imports previously accepted diagnosis, medication, and procedure codes that are absent from that subset;
+3. labels imported entries `unverified`;
+4. backfills all normalized foreign keys;
+5. makes the columns mandatory;
+6. installs strict triggers for future writes.
+
+This avoids blocking a managed upgrade while preventing unverified legacy codes from being described as externally validated.
+
+## New-write behavior
+
+After V007, a new coded row is rejected when:
+
+```text
+source system alias missing
+source code absent
+concept inactive
+normalized domain incorrect
+```
+
+Example:
+
+```text
+ICD10:ZZZ.999
+→ contract may accept structure
+→ terminology subset has no concept
+→ PostgreSQL integrity error
+→ complete diagnosis load rolls back
+```
 
 ## Pre-transaction verification
 
-Before database writes, the loader verifies:
+Before database writes, `database.py` verifies:
 
 1. output counts and completed status;
 2. dataset identity;
@@ -102,7 +148,7 @@ Before database writes, the loader verifies:
 6. raw object path, byte size, and SHA-256;
 7. parseable run metadata.
 
-Only then does it open the transaction.
+Terminology resolution occurs inside the write transaction because it depends on current database state.
 
 ## Transaction behavior
 
@@ -112,52 +158,63 @@ One load writes:
 audit.pipeline_runs
 + valid clinical rows
 + validation errors
++ terminology bindings
 + SCD2 transitions or immutable-event checks
 ```
 
 All operations commit or roll back together.
 
-### Exact immutable-event duplicate
+The raw object, receipt, processed outputs, and quality report exist before this transaction. A database rollback does not delete those investigative artifacts.
+
+## Exact immutable-event duplicate
 
 ```text
-same identifier
-+ same normalized business hash
-→ trigger returns stored row
+same event identifier
++ same source clinical content
+→ terminology resolves consistently
+→ immutable guard returns stored row
 → original source_run_id remains
 ```
 
-### Conflicting immutable-event identity
+## Conflicting immutable-event identity
 
 ```text
-same identifier
-+ different normalized business hash
-→ integrity error
+same event identifier
++ different source clinical content
+→ terminology resolves or rejects
+→ immutable conflict when content differs
 → complete load rollback
 → original event remains unchanged
 ```
 
-## Record hashes
+## Migration detection
 
-`record_sha256` identifies normalized business content. It excludes:
+Version 7 is recognized only when all of these are present:
 
-```text
-source_run_id
-source_sha256
-loaded_at
-```
+- four terminology base tables;
+- four `normalized_concept_id` columns;
+- the normalized-code inspection view;
+- complete V006 structure.
 
-These fields describe ingestion lineage rather than clinical meaning.
+A partial terminology schema is rejected rather than baselined.
 
-## Upgrade example
+## Upgrade commands
 
 ```powershell
-clinical-data database-migrate --target-version 5
+clinical-data database-migrate --target-version 6
 clinical-data database-status
 clinical-data database-migrate
 clinical-data database-validate
 ```
 
-At V005, medication and procedure tables do not exist. The final command applies V006 and validates `detected=6`, `current=6`, and `latest=6`.
+After the final command:
+
+```text
+detected=7
+current=7
+latest=7
+pending=[]
+```
 
 ## Review queries
 
@@ -169,46 +226,61 @@ FROM public.schema_migrations
 ORDER BY version;
 ```
 
-Entity counts:
-
-```sql
-SELECT 'patients' AS dataset, COUNT(*) FROM clinical.patients
-UNION ALL SELECT 'encounters', COUNT(*) FROM clinical.encounters
-UNION ALL SELECT 'diagnoses', COUNT(*) FROM clinical.diagnoses
-UNION ALL SELECT 'observations', COUNT(*) FROM clinical.observations
-UNION ALL SELECT 'medications', COUNT(*) FROM clinical.medications
-UNION ALL SELECT 'procedures', COUNT(*) FROM clinical.procedures
-ORDER BY dataset;
-```
-
-Medication lineage:
+Registered systems:
 
 ```sql
 SELECT
-    medication_id,
-    patient_id,
-    encounter_id,
-    record_sha256,
-    source_run_id,
-    loaded_at
-FROM clinical.medications
-ORDER BY medication_id;
+    code_system_id,
+    canonical_uri,
+    upstream_version,
+    subset_version,
+    complete_release,
+    license_note
+FROM terminology.code_systems
+ORDER BY code_system_id;
 ```
 
-Procedure lineage:
+Concept counts:
 
 ```sql
-SELECT
-    procedure_id,
-    patient_id,
-    encounter_id,
-    record_sha256,
-    source_run_id,
-    loaded_at
-FROM clinical.procedures
-ORDER BY procedure_id;
+SELECT code_system_id, domain, verification_status, COUNT(*)
+FROM terminology.concepts
+GROUP BY code_system_id, domain, verification_status
+ORDER BY code_system_id, domain, verification_status;
+```
+
+Normalized clinical rows:
+
+```sql
+SELECT *
+FROM terminology.normalized_clinical_codes
+ORDER BY dataset_name, entity_id;
+```
+
+Unbound or invalid rows should return zero:
+
+```sql
+SELECT COUNT(*)
+FROM (
+    SELECT normalized_concept_id, 'condition' AS expected_domain
+    FROM clinical.diagnoses
+    UNION ALL
+    SELECT normalized_concept_id, 'observation'
+    FROM clinical.observations
+    UNION ALL
+    SELECT normalized_concept_id, 'medication'
+    FROM clinical.medications
+    UNION ALL
+    SELECT normalized_concept_id, 'procedure'
+    FROM clinical.procedures
+) AS binding
+LEFT JOIN terminology.concepts AS concept
+    ON concept.concept_id = binding.normalized_concept_id
+WHERE concept.concept_id IS NULL
+   OR NOT concept.active
+   OR concept.domain <> binding.expected_domain;
 ```
 
 ## Limits
 
-The database layer does not yet provide terminology reference tables, event supersession, tombstones, bitemporal modelling, bulk staging/`COPY`, production access controls, or PHI-ready governance.
+The database layer does not yet provide terminology release importers, hierarchy traversal, UCUM, FHIR terminology operations, complete execution-state auditing, structured logging, event supersession, tombstones, bitemporal modelling, bulk staging/`COPY`, production access controls, or PHI-ready governance.
