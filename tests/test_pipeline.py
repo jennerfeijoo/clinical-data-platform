@@ -24,6 +24,8 @@ def _count_csv_rows(path: Path) -> int:
         ("encounters", 8, 7, 1, 1),
         ("diagnoses", 7, 6, 1, 2),
         ("observations", 14, 13, 1, 1),
+        ("medications", 7, 6, 1, 1),
+        ("procedures", 7, 6, 1, 1),
     ],
 )
 def test_pipeline_captures_raw_and_writes_consistent_contract_outputs(
@@ -100,7 +102,7 @@ def test_patient_rules_are_executed_from_contract(tmp_path: Path) -> None:
 def test_generic_pipeline_rejects_unknown_dataset(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Unsupported dataset"):
         run_dataset_validation(
-            "medications",
+            "allergies",
             SAMPLE_DIRECTORY / "observations.csv",
             tmp_path / "processed",
             raw_root=tmp_path / "raw",
