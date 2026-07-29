@@ -41,11 +41,26 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("data/benchmarks/loading"),
     )
     parser.add_argument("--database-url", default=None)
+    parser.add_argument(
+        "--allow-destructive-reset",
+        action="store_true",
+        help=(
+            "Confirm that the target is an isolated disposable database whose "
+            "platform tables may be truncated between trials."
+        ),
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not args.allow_destructive_reset:
+        parser.error(
+            "--allow-destructive-reset is required because the benchmark truncates "
+            "platform state between trials."
+        )
+
     configuration = BenchmarkConfiguration(
         patient_counts=tuple(args.patients),
         repetitions=args.repetitions,
