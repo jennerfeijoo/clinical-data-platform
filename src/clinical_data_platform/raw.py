@@ -141,6 +141,39 @@ def _verify_object(path: Path, expected_sha256: str, expected_size: int) -> None
         )
 
 
+def _copy_to_staging(
+    source_path: Path,
+    staging_path: Path,
+    expected_sha256: str,
+    expected_size: int,
+) -> None:
+    digest = hashlib.sha256()
+    copied_size = 0
+    with source_path.open("rb") as source, staging_path.open("xb") as target:
+        while chunk := source.read(1024 * 1024):
+            target.write(chunk)
+            digest.update(chunk)
+            copied_size += len(chunk)
+        target.flush()
+        os.fsync(target.fileno())
+
+    if digest.hexdigest() != expected_sha256 or copied_size != expected_size:
+        raise RawIntegrityError("The source changed while it was being captured.")
+
+
+def _publish_staged_file(staging_path: Path, final_path: Path) -> bool:
+    """Publish with an atomic hard link and never replace an existing path."""
+    try:
+        os.link(staging_path, final_path)
+    except FileExistsError:
+        return False
+    except OSError as exc:
+        raise RawLandingError(
+            "Atomic raw publication requires hard-link support in the landing filesystem."
+        ) from exc
+    return True
+
+
 def _create_content_object(
     source_path: Path,
     object_path: Path,
@@ -148,44 +181,44 @@ def _create_content_object(
     expected_size: int,
 ) -> bool:
     object_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        target = object_path.open("xb")
-    except FileExistsError:
+    if object_path.exists():
         _verify_object(object_path, expected_sha256, expected_size)
         return False
 
+    staging_path = object_path.parent / f".{uuid4()}.staging"
     try:
-        digest = hashlib.sha256()
-        copied_size = 0
-        with source_path.open("rb") as source, target:
-            while chunk := source.read(1024 * 1024):
-                target.write(chunk)
-                digest.update(chunk)
-                copied_size += len(chunk)
-            target.flush()
-            os.fsync(target.fileno())
-
-        copied_sha256 = digest.hexdigest()
-        if copied_sha256 != expected_sha256 or copied_size != expected_size:
-            raise RawIntegrityError("The source changed while it was being captured.")
-        _make_read_only(object_path)
-        return True
-    except Exception:
-        object_path.unlink(missing_ok=True)
-        raise
+        _copy_to_staging(
+            source_path,
+            staging_path,
+            expected_sha256,
+            expected_size,
+        )
+        created = _publish_staged_file(staging_path, object_path)
+        if created:
+            _make_read_only(object_path)
+        else:
+            _verify_object(object_path, expected_sha256, expected_size)
+        return created
+    finally:
+        staging_path.unlink(missing_ok=True)
 
 
 def _write_receipt(path: Path, document: RawReceiptDocument) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    staging_path = path.parent / f".{uuid4()}.staging"
     try:
-        with path.open("xb") as file:
+        with staging_path.open("xb") as file:
             file.write(payload)
             file.flush()
             os.fsync(file.fileno())
-    except FileExistsError as exc:
-        raise RawLandingError(f"Raw receipt already exists and will not be replaced: {path}") from exc
-    _make_read_only(path)
+        if not _publish_staged_file(staging_path, path):
+            raise RawLandingError(
+                f"Raw receipt already exists and will not be replaced: {path}"
+            )
+        _make_read_only(path)
+    finally:
+        staging_path.unlink(missing_ok=True)
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -197,7 +230,7 @@ def capture_raw_source(
     received_at: datetime | None = None,
     receipt_id: UUID | None = None,
 ) -> RawReceipt:
-    """Capture source bytes before parsing, without replacing any existing artifact."""
+    """Capture source bytes before parsing, without replacing existing artifacts."""
     _validate_dataset_name(dataset)
     if not source_path.exists():
         raise FileNotFoundError(f"Source dataset not found: {source_path}")
@@ -205,7 +238,7 @@ def capture_raw_source(
         raise RawLandingError(f"Source dataset path is not a file: {source_path}")
     if source_path.suffix.lower() != ".csv":
         raise RawLandingError(
-            f"The current raw landing profile accepts CSV files, received: "
+            "The current raw landing profile accepts CSV files, received: "
             f"{source_path.suffix or '<none>'}"
         )
 
@@ -281,7 +314,9 @@ def _parse_receipt_document(raw: object) -> RawReceiptDocument:
     for field in string_fields:
         value = raw.get(field)
         if not isinstance(value, str) or not value:
-            raise RawIntegrityError(f"Raw receipt field must be a non-empty string: {field}")
+            raise RawIntegrityError(
+                f"Raw receipt field must be a non-empty string: {field}"
+            )
 
     size_bytes = raw.get("size_bytes")
     if not isinstance(size_bytes, int) or isinstance(size_bytes, bool) or size_bytes < 0:
@@ -302,7 +337,7 @@ def _parse_receipt_document(raw: object) -> RawReceiptDocument:
 
 
 def verify_raw_receipt(raw_root: Path, manifest_relative_path: str) -> RawReceipt:
-    """Verify one receipt, its deterministic location, and its referenced object."""
+    """Verify a receipt, its deterministic location, and its referenced object."""
     manifest_path = _resolve_relative(raw_root, manifest_relative_path)
     if not manifest_path.is_file():
         raise RawIntegrityError(f"Raw receipt is missing: {manifest_path}")
@@ -312,7 +347,9 @@ def verify_raw_receipt(raw_root: Path, manifest_relative_path: str) -> RawReceip
     try:
         raw_document = json.loads(manifest_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RawIntegrityError(f"Raw receipt is not valid UTF-8 JSON: {manifest_path}") from exc
+        raise RawIntegrityError(
+            f"Raw receipt is not valid UTF-8 JSON: {manifest_path}"
+        ) from exc
     document = _parse_receipt_document(raw_document)
 
     if document["storage_version"] != RAW_STORAGE_VERSION:
