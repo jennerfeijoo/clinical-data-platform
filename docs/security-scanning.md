@@ -76,13 +76,27 @@ severity: HIGH, CRITICAL
 unfixed findings: reported but ignored by the failing gate
 ```
 
-The initial scan detected fixed vulnerabilities in the packaging toolchain. The Dockerfile now upgrades:
+The first scans identified vulnerable packaging components from both the build environment and the Python base image. Updating them in a later Docker layer was insufficient because package-manager metadata remained visible in the final filesystem.
+
+The final Dockerfile therefore uses two stages:
 
 ```text
-setuptools >=83
-wheel >=0.46.2
-jaraco.context >=6.1.0
+builder
+→ create /opt/venv
+→ install fixed build tools
+→ install the application
+→ remove pip, setuptools, and wheel from the venv
+
+runtime
+→ remove global pip executables
+→ remove global site-packages
+→ remove ensurepip bootstrap bundles
+→ copy only /opt/venv from the builder
 ```
+
+The runtime image contains the application and required runtime dependencies, but no Python package manager or global build environment. This reduced attack surface and removed the vulnerable `setuptools`, `wheel`, `jaraco.context`, and vendored `msgpack` metadata detected by the earlier scans.
+
+This is not the non-root container milestone: the process still runs under the image's default user until the next hardening step.
 
 Ignoring unfixed findings avoids blocking every build on a vulnerability for which no remediation exists, but the finding remains visible in the scanner output. This is a policy choice, not a statement that unfixed vulnerabilities are harmless.
 
