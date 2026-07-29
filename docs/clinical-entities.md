@@ -2,7 +2,7 @@
 
 ## Scope
 
-The platform now models six synthetic clinical datasets:
+The platform models six synthetic clinical datasets:
 
 1. patients;
 2. encounters;
@@ -40,7 +40,7 @@ Represents a time-bounded contact with the clinical system.
 
 Primary key: `encounter_id`.
 
-Required relationships: patient.
+Required relationship: patient.
 
 ### Diagnoses
 
@@ -48,7 +48,9 @@ Represents one coded diagnosis event associated with a patient and encounter.
 
 Primary key: `diagnosis_id`.
 
-Code systems currently accepted by the contract: `ICD10`, `SNOMED`.
+Contract-level systems: `ICD10`, `SNOMED`.
+
+Persistence requires an active normalized concept in the `condition` domain.
 
 ### Observations
 
@@ -58,17 +60,19 @@ Primary key: `observation_id`.
 
 The current sample supports systolic blood pressure, diastolic blood pressure, and heart rate with code-specific units and plausible ranges.
 
+Local observation codes are preserved and mapped to LOINC concepts during persistence.
+
 ### Medications
 
 Represents one medication event with coded medication identity, status, timing, optional dose, and optional route.
 
 Primary key: `medication_id`.
 
-Contract-level code-system values: `RXNORM`, `ATC`.
+Contract-level systems: `RXNORM`, `ATC`.
 
 Statuses: `ACTIVE`, `COMPLETED`, `STOPPED`.
 
-The contract checks start/end order. PostgreSQL additionally requires a positive dose and a non-empty unit when dose information is supplied.
+The contract checks start/end order. PostgreSQL additionally requires dose consistency, parent relationships, an active `medication` concept, record hashing, and event immutability.
 
 ### Procedures
 
@@ -76,45 +80,69 @@ Represents one coded procedure event associated with a patient and encounter.
 
 Primary key: `procedure_id`.
 
-Contract-level code-system values: `SNOMED`, `CPT`, `ICD10PCS`.
+Contract-level systems: `SNOMED`, `CPT`, `ICD10PCS`.
 
 Statuses: `COMPLETED`, `IN_PROGRESS`, `NOT_DONE`.
 
+Persistence requires an active normalized concept in the `procedure` domain.
+
 ## Persistence semantics
 
-| Entity | Persistence policy |
-|---|---|
-| patients | current snapshot plus SCD Type 2 history |
-| encounters | immutable event |
-| diagnoses | immutable event |
-| observations | immutable event |
-| medications | immutable event |
-| procedures | immutable event |
+| Entity | Persistence policy | Terminology binding |
+|---|---|---|
+| patients | current snapshot plus SCD Type 2 history | none |
+| encounters | immutable event | none |
+| diagnoses | immutable event | condition concept |
+| observations | immutable event | observation concept |
+| medications | immutable event | medication concept |
+| procedures | immutable event | procedure concept |
 
 For immutable events, an exact duplicate is a no-op. Reusing the same identifier with different business content raises an integrity error and rolls back the complete dataset load.
 
-## Contract and database boundaries
+## Contract, terminology, and database boundaries
 
 Contracts validate intrinsic row properties such as required values, data types, categorical vocabularies, temporal order, and measurement ranges.
 
-PostgreSQL validates relational and persistence properties such as foreign keys, dose pairing, positive dose, record hashes, event immutability, and transaction rollback.
+The terminology layer validates whether a declared system and code resolve to an active concept in the expected domain.
 
-A row may therefore pass its executable contract but still fail persistence when it references a missing parent or conflicts with an already accepted event identifier.
+PostgreSQL additionally validates foreign keys, dose pairing, record hashes, event immutability, and transaction rollback.
+
+A row may therefore pass its executable contract but fail persistence because:
+
+- its parent does not exist;
+- its code is unknown to the installed subset;
+- its normalized concept has the wrong domain;
+- its event identifier conflicts with accepted content.
+
+## Source and normalized code examples
+
+| Entity | Source representation | Normalized representation |
+|---|---|---|
+| diagnosis D002 | `ICD10:I10` | `ICD10CM:I10` |
+| observation O001 | `LOCAL_OBSERVATION:SYSTOLIC_BP` | `LOINC:8480-6` |
+| medication M001 | `RXNORM:197361` | `RXNORM:197361` |
+| procedure PR001 | `SNOMED:386053000` | `SNOMEDCT:386053000` |
+
+Aliases canonicalize system names. Concept mappings may additionally change the code and system, as in the local-observation-to-LOINC mappings.
 
 ## Bundled sample
 
-| Dataset | Received | Valid | Invalid |
-|---|---:|---:|---:|
-| patients | 8 | 5 | 3 |
-| encounters | 8 | 7 | 1 |
-| diagnoses | 7 | 6 | 1 |
-| observations | 14 | 13 | 1 |
-| medications | 7 | 6 | 1 |
-| procedures | 7 | 6 | 1 |
+| Dataset | Received | Valid | Invalid | Persisted |
+|---|---:|---:|---:|---:|
+| patients | 8 | 5 | 3 | 5 |
+| encounters | 8 | 7 | 1 | 7 |
+| diagnoses | 7 | 6 | 1 | 6 |
+| observations | 14 | 13 | 1 | 13 |
+| medications | 7 | 6 | 1 | 6 |
+| procedures | 7 | 6 | 1 | 6 |
 
-All values are synthetic. Codes are illustrative identifiers accepted by the local contract; the repository does not claim semantic validation against complete external terminology releases.
+The four coded event tables produce 31 normalized terminology bindings.
+
+All values are synthetic. External terminology entries are small local subsets rather than complete releases.
 
 ## Review queries
+
+Entity counts:
 
 ```sql
 SELECT 'patients' AS dataset, COUNT(*) FROM clinical.patients
@@ -131,8 +159,25 @@ SELECT 'procedures', COUNT(*) FROM clinical.procedures
 ORDER BY dataset;
 ```
 
-Expected counts after a clean demo are 5, 7, 6, 13, 6, and 6 respectively.
+Normalized coded events:
+
+```sql
+SELECT
+    dataset_name,
+    entity_id,
+    source_system,
+    source_code,
+    normalized_system,
+    normalized_code,
+    normalized_display,
+    domain,
+    verification_status
+FROM terminology.normalized_clinical_codes
+ORDER BY dataset_name, entity_id;
+```
 
 ## Current boundary
 
-The next milestone introduces terminology normalization. Until then, `code_system` is required and constrained, but codes are not mapped to reference tables, versioned terminology releases, standard concepts, or semantic equivalence groups.
+The six-entity model and its minimal terminology bindings are implemented. The next roadmap milestone introduces complete execution states and structured logging.
+
+The terminology subset still lacks release importers, automatic synchronization, hierarchy queries, UCUM normalization, multilingual designations, contextual many-to-many mappings, and FHIR terminology operations.
