@@ -167,13 +167,18 @@ jobs:
           --entrypoint python clinical-data-platform:ci
           -c "from clinical_data_platform.migration import discover_migrations; print(len(discover_migrations()))"
 
-      - name: Validate PostgreSQL from hardened container
-        run: >-
-          docker run --rm --read-only
-          --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777
-          --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 256
-          --network host --env DATABASE_URL="$DATABASE_URL"
-          clinical-data-platform:ci database-validate
+      - name: Migrate and validate PostgreSQL from hardened container
+        run: |
+          docker run --rm --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777 \
+            --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 256 \
+            --network host --env DATABASE_URL="$DATABASE_URL" \
+            clinical-data-platform:ci database-migrate
+          docker run --rm --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777 \
+            --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 256 \
+            --network host --env DATABASE_URL="$DATABASE_URL" \
+            clinical-data-platform:ci database-validate
 
       - name: Smoke-test container raw capture as UID 10001
         run: |
