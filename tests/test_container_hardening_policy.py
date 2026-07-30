@@ -27,6 +27,13 @@ def test_runtime_image_declares_fixed_non_root_identity() -> None:
     assert "USER root" not in dockerfile
 
 
+def test_container_builder_includes_the_declared_local_build_backend() -> None:
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "COPY pyproject.toml README.md build_backend.py ./" in dockerfile
+    assert "/opt/venv/bin/python -m pip install --no-cache-dir ." in dockerfile
+
+
 def test_runtime_image_keeps_application_files_read_only() -> None:
     dockerfile = DOCKERFILE.read_text(encoding="utf-8")
 
