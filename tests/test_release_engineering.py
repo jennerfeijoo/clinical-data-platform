@@ -25,7 +25,7 @@ def test_release_metadata_gate_passes_for_current_version() -> None:
             sys.executable,
             "scripts/check_release.py",
             "--expected-version",
-            "0.21.0",
+            "1.0.0",
         ],
         cwd=ROOT,
         check=True,
@@ -34,8 +34,8 @@ def test_release_metadata_gate_passes_for_current_version() -> None:
     )
 
     summary = json.loads(completed.stdout)
-    assert summary["version"] == "0.21.0"
-    assert summary["expected_tag"] == "v0.21.0"
+    assert summary["version"] == "1.0.0"
+    assert summary["expected_tag"] == "v1.0.0"
     assert summary["packaged_cohort_sql_matches_repository"] is True
 
 
@@ -73,7 +73,7 @@ def _write_variable_sdist(path: Path, *, tar_mtime: int, gzip_mtime: int) -> Non
     payload = b"release-evidence\n"
     tar_buffer = io.BytesIO()
     with tarfile.open(fileobj=tar_buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
-        member = tarfile.TarInfo("clinical_data_platform-0.21.0/evidence.txt")
+        member = tarfile.TarInfo("clinical_data_platform-1.0.0/evidence.txt")
         member.size = len(payload)
         member.mtime = tar_mtime
         member.uid = tar_mtime
@@ -134,8 +134,8 @@ def test_release_workflow_requires_reproducibility_and_clean_wheel_install() -> 
         "python scripts/verify_distribution.py",
         'python -m venv "$RUNNER_TEMP/release-venv"',
         'cd "$RUNNER_TEMP"',
-        "clinical-data\" validate-contracts",
-        "clinical-data-cohort\" list-profiles",
+        'clinical-data" validate-contracts',
+        'clinical-data-cohort" list-profiles',
         "SHA256SUMS",
         "release-manifest.json",
     )
@@ -151,6 +151,7 @@ def test_project_declares_typed_and_release_package_metadata() -> None:
 
     assert document["build-system"]["build-backend"] == "build_backend"
     assert document["build-system"]["backend-path"] == ["."]
+    assert "Development Status :: 5 - Production/Stable" in project["classifiers"]
     assert "Typing :: Typed" in project["classifiers"]
     assert any(item.startswith("build") for item in release_dependencies)
     assert any(item.startswith("twine") for item in release_dependencies)
