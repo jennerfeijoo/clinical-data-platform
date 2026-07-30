@@ -72,7 +72,9 @@ def test_ci_executes_real_commands_under_hardened_runtime() -> None:
         "--security-opt no-new-privileges:true",
         "--pids-limit 256",
         "/tmp:rw,noexec,nosuid,size=64m,mode=1777",
-        "Validate PostgreSQL from hardened container",
+        "Migrate and validate PostgreSQL from hardened container",
+        "clinical-data-platform:ci database-migrate",
+        "clinical-data-platform:ci database-validate",
         "Smoke-test container raw capture as UID 10001",
         'test "$(stat -c \'%u\' "$RECEIPT")" = "10001"',
     )
