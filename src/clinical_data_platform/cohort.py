@@ -59,20 +59,9 @@ class CohortSummary:
     metadata_path: Path
 
 
-def _is_default_repository_sql_path(sql_path: Path) -> bool:
-    return tuple(sql_path.parts[-3:]) == (
-        "sql",
-        "cohorts",
-        HYPERTENSION_DEFINITION_RESOURCE,
-    )
-
-
 def load_hypertension_cohort_sql(sql_path: Path | None = None) -> tuple[str, str]:
     """Load the packaged cohort definition or an explicit reviewed override."""
-    use_packaged = sql_path is None or (
-        not sql_path.exists() and _is_default_repository_sql_path(sql_path)
-    )
-    if use_packaged:
+    if sql_path is None:
         resource = files(HYPERTENSION_DEFINITION_PACKAGE).joinpath(
             HYPERTENSION_DEFINITION_RESOURCE
         )
@@ -85,7 +74,6 @@ def load_hypertension_cohort_sql(sql_path: Path | None = None) -> tuple[str, str
             f"{HYPERTENSION_DEFINITION_PACKAGE}:{HYPERTENSION_DEFINITION_RESOURCE}",
         )
 
-    assert sql_path is not None
     if not sql_path.exists():
         raise FileNotFoundError(f"Cohort SQL file not found: {sql_path}")
     if not sql_path.is_file():
