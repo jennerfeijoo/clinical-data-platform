@@ -34,6 +34,7 @@ SDIST_REQUIRED_SUFFIXES: Final = (
     "/README.md",
     "/SECURITY.md",
     "/SUPPORT.md",
+    "/build_backend.py",
     "/docs/index.md",
     "/docs/limitations.md",
     "/docs/release-process.md",
@@ -50,6 +51,7 @@ SDIST_FORBIDDEN_PARTS: Final = (
     "/data/raw/",
     "/data/synthea/",
 )
+EXPECTED_PYTHON_CLAUSES: Final = frozenset({">=3.11", "<3.15"})
 
 
 class DistributionError(RuntimeError):
@@ -87,6 +89,10 @@ def _metadata_value(metadata: str, key: str) -> str:
     return match.group(1).strip()
 
 
+def _python_clauses(value: str) -> frozenset[str]:
+    return frozenset(clause.strip() for clause in value.split(",") if clause.strip())
+
+
 def _verify_wheel(wheel: Path, expected_version: str) -> dict[str, object]:
     with zipfile.ZipFile(wheel) as archive:
         names = tuple(sorted(archive.namelist()))
@@ -121,7 +127,7 @@ def _verify_wheel(wheel: Path, expected_version: str) -> dict[str, object]:
             f"Wheel version {version} does not match expected {expected_version}."
         )
     requires_python = _metadata_value(metadata, "Requires-Python")
-    if requires_python != ">=3.11,<3.15":
+    if _python_clauses(requires_python) != EXPECTED_PYTHON_CLAUSES:
         raise DistributionError(
             f"Unexpected wheel Requires-Python value: {requires_python}"
         )
