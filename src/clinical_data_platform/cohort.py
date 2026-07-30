@@ -7,8 +7,9 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib.resources import files
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 from uuid import UUID, uuid4
 
 import psycopg
@@ -26,6 +27,8 @@ REQUIRED_SOURCE_DATASETS = frozenset(
     {"patients", "encounters", "diagnoses", "observations"}
 )
 HYPERTENSION_DEFINITION_VERSION = "hypertension-v1"
+HYPERTENSION_DEFINITION_PACKAGE: Final = "clinical_data_platform.cohort_definitions"
+HYPERTENSION_DEFINITION_RESOURCE: Final = "hypertension.sql"
 HYPERTENSION_FIELDS = (
     "patient_id",
     "index_date",
@@ -56,6 +59,28 @@ class CohortSummary:
     metadata_path: Path
 
 
+def load_hypertension_cohort_sql(sql_path: Path | None = None) -> tuple[str, str]:
+    """Load the packaged cohort definition or an explicit reviewed override."""
+    if sql_path is None:
+        resource = files(HYPERTENSION_DEFINITION_PACKAGE).joinpath(
+            HYPERTENSION_DEFINITION_RESOURCE
+        )
+        if not resource.is_file():
+            raise FileNotFoundError(
+                "Packaged hypertension cohort definition was not found."
+            )
+        return (
+            resource.read_text(encoding="utf-8"),
+            f"{HYPERTENSION_DEFINITION_PACKAGE}:{HYPERTENSION_DEFINITION_RESOURCE}",
+        )
+
+    if not sql_path.exists():
+        raise FileNotFoundError(f"Cohort SQL file not found: {sql_path}")
+    if not sql_path.is_file():
+        raise FileNotFoundError(f"Cohort SQL path is not a file: {sql_path}")
+    return sql_path.read_text(encoding="utf-8"), str(sql_path)
+
+
 def _source_runs(
     connection: psycopg.Connection[Any],
 ) -> tuple[tuple[UUID, str], ...]:
@@ -82,7 +107,7 @@ def _source_runs(
 
 def build_hypertension_cohort(
     connection: psycopg.Connection[Any],
-    sql_path: Path,
+    sql_path: Path | None,
     output_directory: Path,
     *,
     minimum_age: int = 18,
@@ -96,8 +121,8 @@ def build_hypertension_cohort(
         raise ValueError("minimum_follow_up_days cannot be negative")
     if baseline_window_days < 0:
         raise ValueError("baseline_window_days cannot be negative")
-    if not sql_path.exists():
-        raise FileNotFoundError(f"Cohort SQL file not found: {sql_path}")
+
+    cohort_sql, cohort_sql_source = load_hypertension_cohort_sql(sql_path)
 
     with ensure_correlation_id():
         emit_log(
@@ -107,6 +132,7 @@ def build_hypertension_cohort(
             "Started hypertension cohort build.",
             cohort_name="hypertension",
             definition_version=HYPERTENSION_DEFINITION_VERSION,
+            cohort_sql_source=cohort_sql_source,
             minimum_age=minimum_age,
             minimum_follow_up_days=minimum_follow_up_days,
             baseline_window_days=baseline_window_days,
@@ -129,7 +155,6 @@ def build_hypertension_cohort(
             "minimum_follow_up_days": minimum_follow_up_days,
             "baseline_window_days": baseline_window_days,
         }
-        cohort_sql = sql_path.read_text(encoding="utf-8")
 
         with bind_log_context(
             cohort_run_id=str(cohort_run_id),
@@ -141,6 +166,7 @@ def build_hypertension_cohort(
                 operation="execute_cohort_sql",
                 stage="database_build",
                 definition_version=HYPERTENSION_DEFINITION_VERSION,
+                cohort_sql_source=cohort_sql_source,
                 source_run_count=len(source_runs),
             ) as database_log:
                 with connection.transaction():
@@ -212,6 +238,7 @@ def build_hypertension_cohort(
                     "cohort_run_id": str(cohort_run_id),
                     "cohort_name": "hypertension",
                     "definition_version": HYPERTENSION_DEFINITION_VERSION,
+                    "cohort_sql_source": cohort_sql_source,
                     "generated_at": generated_at.isoformat(),
                     "parameters": parameters,
                     "row_count": len(rows),
