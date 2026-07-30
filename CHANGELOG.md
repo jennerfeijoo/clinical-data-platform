@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.0
+
+- declared the first stable software release after validating the complete synthetic clinical data engineering workflow, executable contracts, immutable raw lineage, six-entity PostgreSQL model, terminology normalization, audited execution states, structured logging, reproducible Synthea cohorts, attrition and missingness evidence, bulk loading, and governed benchmarks;
+- retained Python 3.11–3.14 compatibility, mandatory statement coverage of at least 90%, security and dependency scanning, and the hardened non-root container as release gates;
+- promoted package maturity metadata from beta to stable and synchronized version `1.0.0` across package metadata, citation metadata, README, tests, CI, and the semantic tag contract;
+- added an explicit stable-release readiness record distinguishing API and artifact stability from healthcare production readiness;
+- preserved the PostgreSQL schema at migrations V001–V008 and introduced no clinical data model changes in the stable release;
+- retained the synthetic-only, non-clinical, non-PHI boundary: stable software maturity does not imply clinical validation, regulatory suitability, epidemiological validity, or production healthcare readiness;
+- kept PyPI publication disabled; governed wheel, source distribution, checksums, and release manifest are published only as GitHub Release assets.
+
 ## 0.21.0
 
 - added a governed release gate that keeps package metadata, package `__version__`, CHANGELOG, CITATION metadata, README, tests, CI, and semantic release tags synchronized;
