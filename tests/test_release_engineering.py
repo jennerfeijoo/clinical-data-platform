@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from build_backend import normalize_sdist
+from clinical_data_platform.cli import build_parser
 from clinical_data_platform.cohort import load_hypertension_cohort_sql
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,20 +49,17 @@ def test_packaged_hypertension_definition_matches_repository_copy() -> None:
     assert "INSERT INTO analytics.hypertension_features" in sql
 
 
-def test_missing_default_repository_sql_path_falls_back_to_package(
-    tmp_path: Path,
-) -> None:
-    default_path = tmp_path / "sql" / "cohorts" / "hypertension.sql"
+def test_cli_default_uses_the_packaged_cohort_definition() -> None:
+    args = build_parser().parse_args(["build-hypertension-cohort"])
 
-    sql, source = load_hypertension_cohort_sql(default_path)
-
-    assert "hypertension_features" in sql
-    assert source.startswith("clinical_data_platform.cohort_definitions:")
+    assert args.sql is None
 
 
 def test_missing_explicit_sql_override_is_rejected(tmp_path: Path) -> None:
+    explicit_path = tmp_path / "sql" / "cohorts" / "hypertension.sql"
+
     with pytest.raises(FileNotFoundError, match="Cohort SQL file not found"):
-        load_hypertension_cohort_sql(tmp_path / "custom-definition.sql")
+        load_hypertension_cohort_sql(explicit_path)
 
 
 def test_wheel_runtime_markers_are_available_from_source_tree() -> None:
