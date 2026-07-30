@@ -1,17 +1,27 @@
 # Documentation index
 
-This index separates architecture, operation, evidence, policy, and learning material for the Clinical Data Platform.
+This index separates architecture, operation, evidence, policy, pilot preparation, and learning material for the Clinical Data Platform.
 
 The repository is synthetic-only. Nothing in these documents authorizes identifiable patient data, clinical decisions, production healthcare operation, epidemiological inference, or regulatory use.
 
 ## Start here
 
 - [README](../README.md): project purpose, architecture, installation, and primary commands.
+- [Clinical pilot boundary](../PILOT.md): concise statement of the defensible clinic-pilot offer.
 - [CLI reference](cli-reference.md): command groups, required inputs, outputs, and destructive boundaries.
 - [Architecture](architecture.md): components, data flow, and trust boundaries.
 - [Database](database.md): schemas, migrations, lineage, and inspection queries.
 - [Stable release readiness](stable-release-readiness.md): `1.0.0` compatibility surface, gates, and non-goals.
 - [Current limitations](limitations.md): unsupported claims and known engineering boundaries.
+
+## Clinic pilot preparation
+
+- [Clinical pilot readiness](clinical-pilot-readiness.md): data boundary, go/no-go controls, deliverables, acceptance criteria, roles, stop conditions, and commercial positioning.
+- [Clinical data coverage](clinical-data-coverage.md): exact current fields, missing clinical domains, and extension priorities.
+- [Pilot data inventory template](../templates/clinical-pilot-data-inventory.csv): source and governance discovery worksheet.
+- [Pilot risk register template](../templates/clinical-pilot-risk-register.csv): initial privacy, semantic, quality, security, and scope risks.
+
+These documents prepare a bounded engineering pilot. They do not convert the repository into a PHI-ready or clinically validated system.
 
 ## Data contracts and ingestion
 
