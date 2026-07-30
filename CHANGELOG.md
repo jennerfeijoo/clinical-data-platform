@@ -2,11 +2,9 @@
 
 ## Unreleased
 
-- added a clinic-pilot boundary, readiness checklist, data-coverage matrix, data-inventory template, and risk-register template;
-- added executable policy tests that preserve the synthetic-only, non-PHI, non-clinical pilot boundary;
 - corrected the stable security-support statement for version `1.0.0`;
-- added missing documentation-index entry points for executable contracts and immutable raw landing;
-- added a repository file-reference entry point and companion per-file documentation workflow;
+- added missing documentation entry points for executable contracts and immutable raw landing;
+- added technical references for clinical-data coverage, architecture status, and repository file responsibilities;
 - retained the existing V001-V008 database schema and introduced no clinical model or runtime API change.
 
 ## 1.0.0
