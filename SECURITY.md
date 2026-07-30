@@ -10,7 +10,7 @@ Do not open a public issue containing exploit details, credentials, tokens, priv
 
 Use GitHub's private vulnerability reporting feature for this repository when available. Include:
 
-- the affected commit or version;
+- the affected commit, tag, version, or artifact SHA-256;
 - the component and execution path;
 - reproducible steps using synthetic data only;
 - expected and observed behavior;
@@ -28,11 +28,29 @@ The repository runs:
 - CodeQL with the extended Python security query suite;
 - Trivy for high and critical vulnerabilities in the built container image;
 - Dependabot for Python, GitHub Actions, and Docker update proposals;
-- hardened container smoke tests under a read-only root filesystem, dropped capabilities, `no-new-privileges`, and a constrained `/tmp` tmpfs.
+- hardened container smoke tests under a read-only root filesystem, dropped capabilities, `no-new-privileges`, and a constrained `/tmp` tmpfs;
+- release-toolchain auditing, wheel and source-distribution content inspection, clean-wheel installation, reproducible double builds, and SHA-256 release evidence.
 
-The dedicated GitHub Dependency Review Action is not used because Dependency Graph is not enabled for this repository. Pull requests are instead blocked when the complete resolved Python environment contains a known vulnerability. This audits the proposed head environment but does not provide a base-versus-head dependency diff.
+The dedicated GitHub Dependency Review Action is not used because Dependency Graph is not enabled. Pull requests are instead blocked when the complete resolved Python environment contains a known vulnerability. This audits the proposed head environment but does not provide a base-versus-head dependency diff.
 
 GitHub Actions are pinned to full commit SHAs and updated through reviewed pull requests.
+
+## Release artifact policy
+
+Tag releases are built from the exact tagged commit by `.github/workflows/release.yml`. The workflow verifies version/tag consistency, builds the wheel and source distribution twice with a fixed source epoch, compares the artifacts byte for byte, inspects their contents, installs the wheel outside the source repository, and publishes:
+
+```text
+wheel
+source distribution
+SHA256SUMS
+release-manifest.json
+```
+
+Published release tags and assets must not be moved or silently replaced. A correction requires a new version so consumers can distinguish the bytes and provenance.
+
+The current workflow creates GitHub Releases only. It does not publish to PyPI and does not request an OpenID Connect publishing token. PyPI Trusted Publishing requires separate configuration and review.
+
+Artifact checks reduce packaging and provenance errors. They do not provide cryptographic signing, SLSA certification, malicious-maintainer resistance, complete dependency provenance, or protection if GitHub, the runner, or repository credentials are compromised.
 
 ## Container runtime policy
 
@@ -64,4 +82,4 @@ The baseline suppresses only those recorded findings. New findings, changed loca
 
 ## Scope limits
 
-Passing automated scans and hardened container tests does not prove absence of vulnerabilities. The controls do not establish regulatory compliance, production readiness, secure PHI handling, penetration-test coverage, or protection against unknown vulnerabilities and malicious dependencies.
+Passing automated scans, release checks, and hardened container tests does not prove absence of vulnerabilities. The controls do not establish regulatory compliance, production readiness, secure PHI handling, penetration-test coverage, artifact authenticity under every threat model, or protection against unknown vulnerabilities and malicious dependencies.
