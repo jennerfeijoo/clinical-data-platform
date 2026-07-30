@@ -29,7 +29,10 @@ FROM python:3.11-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH="/opt/venv/bin:$PATH"
+    PATH="/opt/venv/bin:$PATH" \
+    HOME="/home/clinical" \
+    XDG_CACHE_HOME="/tmp/.cache" \
+    XDG_CONFIG_HOME="/tmp/.config"
 
 WORKDIR /app
 
@@ -38,9 +41,37 @@ RUN rm -rf \
         /usr/local/lib/python3.11/ensurepip \
         /usr/local/lib/python3.11/site-packages/*
 
-COPY --from=builder /opt/venv /opt/venv
-COPY data ./data
-COPY sql ./sql
+COPY --from=builder --chown=0:0 /opt/venv /opt/venv
+COPY --chown=0:0 data/sample ./data/sample
+COPY --chown=0:0 sql ./sql
+
+RUN groupadd --gid 10001 clinical \
+    && useradd \
+        --uid 10001 \
+        --gid 10001 \
+        --home-dir /home/clinical \
+        --create-home \
+        --shell /usr/sbin/nologin \
+        clinical \
+    && mkdir -p \
+        /app/data/raw \
+        /app/data/processed \
+        /app/data/analytics \
+    && chown -R 0:0 /opt/venv /app \
+    && chmod -R a-w /opt/venv /app \
+    && chown -R 10001:10001 \
+        /home/clinical \
+        /app/data/raw \
+        /app/data/processed \
+        /app/data/analytics \
+    && chmod 0700 /home/clinical \
+    && chmod 0750 \
+        /app/data/raw \
+        /app/data/processed \
+        /app/data/analytics \
+    && find /usr /bin /sbin -xdev -type f -perm /6000 -exec chmod a-s {} +
+
+USER 10001:10001
 
 ENTRYPOINT ["clinical-data"]
 CMD ["--help"]

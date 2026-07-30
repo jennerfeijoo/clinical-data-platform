@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.20.0
+
+- changed the application image to the fixed non-root runtime identity `10001:10001` with a non-login account;
+- made the supported runtime profile use a read-only root filesystem, `cap-drop=ALL`, `no-new-privileges`, a constrained `noexec,nosuid` `/tmp` tmpfs, and a PID limit;
+- made `/app`, `/opt/venv`, bundled sample data, and SQL immutable to the application user while retaining explicit raw, processed, and analytics output mount points;
+- stripped setuid/setgid bits from standard executable paths and retained the package-manager-free multi-stage runtime introduced in `0.19.0`;
+- replaced the complete repository data bind mount in Compose with named output volumes and the same hardened runtime controls used by CI;
+- added behavioral container tests for effective UID/GID, non-login shell, read-only paths, PostgreSQL connectivity, contracts, profiles, migrations, and raw-capture ownership;
+- added policy tests that prevent removal of the Dockerfile, Compose, or CI hardening controls;
+- added technical documentation and a Spanish learning guide, while retaining the synthetic-only, non-clinical, non-PHI project boundary.
+
 ## 0.19.0
 
 - added a dedicated security workflow for complete Python environment auditing, Bandit, CodeQL, and Trivy container scanning;

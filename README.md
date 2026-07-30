@@ -1,6 +1,6 @@
 # Clinical Data Platform
 
-> Status: active development toward `1.0.0` — version `0.19.0` adds automated dependency, source-code, workflow supply-chain, and container vulnerability scanning.
+> Status: active development toward `1.0.0` — version `0.20.0` runs the application container as a fixed non-root identity and validates a read-only, capability-free runtime.
 
 Clinical Data Platform is a synthetic clinical data engineering project that demonstrates how healthcare-like CSV sources become auditable, terminology-linked, analysis-ready datasets.
 
@@ -36,9 +36,45 @@ Governed target merge
             └── attrition and missingness evidence
 ```
 
+## Hardened non-root container
+
+Version `0.20.0` changes the runtime image and its validation policy:
+
+| Control | Enforced behavior |
+|---|---|
+| Runtime identity | UID/GID `10001:10001`; no root fallback |
+| Login surface | User `clinical` has `/usr/sbin/nologin` |
+| Root filesystem | CI and Compose run it read-only |
+| Linux capabilities | All capabilities are dropped |
+| Privilege escalation | `no-new-privileges:true` |
+| Temporary writes | `/tmp` is a `tmpfs` with `noexec,nosuid` |
+| Process ceiling | `pids_limit: 256` |
+| Application files | `/app`, `/opt/venv`, bundled samples, and SQL are read-only |
+| Persistent outputs | Raw, processed, and analytics paths use explicit writable volumes |
+
+The Dockerfile also removes package managers and Python bootstrap tooling from the final image, strips setuid/setgid bits from standard executable paths, and copies only the bundled sample data required by the demo.
+
+Reference hardened execution:
+
+```bash
+docker build --tag clinical-data-platform:local .
+docker run --rm \
+  --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777 \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --pids-limit 256 \
+  clinical-data-platform:local validate-contracts
+```
+
+A writable operation requires an explicit volume owned by, or writable for, UID `10001`. CI verifies that raw receipt files are actually created by UID `10001` rather than by root.
+
+- Technical policy: [`docs/container-hardening.md`](docs/container-hardening.md)
+- Spanish guide: [`docs/learning/contenedor-no-root-es.md`](docs/learning/contenedor-no-root-es.md)
+
 ## Security and dependency scanning
 
-Version `0.19.0` adds independent controls for different risk surfaces:
+Version `0.19.0` added independent controls for different risk surfaces:
 
 | Surface | Control | Blocking policy |
 |---|---|---|
@@ -71,7 +107,7 @@ A green scan means that the configured tools found no blocking issue under their
 
 ## Python compatibility
 
-Version `0.19.0` retains the explicitly tested range:
+Version `0.20.0` retains the explicitly tested range:
 
 ```toml
 requires-python = ">=3.11,<3.15"
@@ -85,7 +121,7 @@ requires-python = ">=3.11,<3.15"
 | 3.14 | PostgreSQL-backed compatibility matrix |
 | 3.15+ | rejected until explicitly tested |
 
-Python 3.11 runs Ruff, strict mypy, coverage, Docker, container smoke tests, and the governed loading benchmark. Python 3.12–3.14 each receive an isolated PostgreSQL 16 service and run installation, `pip check`, contracts, migrations, and the complete coverage-gated test suite.
+Python 3.11 runs Ruff, strict mypy, coverage, Docker, hardened container smoke tests, and the governed loading benchmark. Python 3.12–3.14 each receive an isolated PostgreSQL 16 service and run installation, `pip check`, contracts, migrations, and the complete coverage-gated test suite.
 
 - Technical policy: [`docs/python-compatibility.md`](docs/python-compatibility.md)
 - Spanish guide: [`docs/learning/compatibilidad-python-ci-es.md`](docs/learning/compatibilidad-python-ci-es.md)
@@ -185,7 +221,7 @@ latest=8
 pending=[]
 ```
 
-The security milestone introduces no `V009` because it changes workflows, package metadata, tests, and documentation rather than persistent database objects.
+The container-hardening milestone introduces no `V009` because it changes image construction, runtime policy, CI, tests, Compose, and documentation rather than persistent database objects.
 
 ## Local development
 
@@ -204,6 +240,12 @@ $env:DATABASE_URL = "postgresql://clinical_user:clinical_password@localhost:5432
 clinical-data database-migrate
 clinical-data database-validate
 clinical-data run-demo --repository-root .
+```
+
+Hardened Compose demo:
+
+```bash
+docker compose --profile demo up --build --abort-on-container-exit app
 ```
 
 Quality checks:
@@ -230,10 +272,12 @@ docker build --tag clinical-data-platform:local .
 - mandatory statement coverage of at least 90%;
 - PostgreSQL-backed CPython 3.11–3.14 compatibility CI;
 - `pip-audit`, Bandit with a governed baseline, CodeQL, Trivy, Dependabot, and full-SHA action pinning;
+- a fixed non-root container identity, read-only root filesystem policy, dropped capabilities, no-new-privileges, and explicit writable volumes;
 - Docker, Compose, PowerShell, POSIX, Ruff, strict mypy, pytest, and GitHub Actions.
 
 ## Documentation
 
+- [`docs/container-hardening.md`](docs/container-hardening.md)
 - [`docs/security-scanning.md`](docs/security-scanning.md)
 - [`docs/python-compatibility.md`](docs/python-compatibility.md)
 - [`docs/testing-coverage.md`](docs/testing-coverage.md)
@@ -246,12 +290,11 @@ docker build --tag clinical-data-platform:local .
 
 ## Current limitations
 
-Remaining milestones before `1.0.0`:
+Remaining milestone before `1.0.0`:
 
-- non-root container hardening;
 - final documentation and release engineering.
 
-The repository is not PHI-ready. The Synthea Java generator is not executed in normal CI. Contract validation still materializes complete source datasets. The two-cohort load is not one global transaction. Attrition is technical row exclusion, not participant follow-up. Missingness classification does not establish MCAR, MAR, or MNAR. The benchmark measures initial single-writer loading, not production capacity. Automated security tools do not replace threat modeling, manual review, penetration testing, deployment hardening, or regulatory controls.
+The repository is not PHI-ready. The Synthea Java generator is not executed in normal CI. Contract validation still materializes complete source datasets. The two-cohort load is not one global transaction. Attrition is technical row exclusion, not participant follow-up. Missingness classification does not establish MCAR, MAR, or MNAR. The benchmark measures initial single-writer loading, not production capacity. Automated security tools and container hardening do not replace threat modeling, manual review, penetration testing, secret management, network policy, deployment hardening, or regulatory controls.
 
 ## License
 

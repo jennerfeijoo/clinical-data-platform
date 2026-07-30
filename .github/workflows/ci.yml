@@ -109,38 +109,95 @@ jobs:
       - name: Test with mandatory coverage
         run: python -m pytest
 
+      - name: Validate Compose hardening configuration
+        run: docker compose --profile demo config --quiet
+
       - name: Build container image
         run: docker build --tag clinical-data-platform:ci .
 
+      - name: Verify hardened container identity and filesystem
+        run: |
+          CONFIGURED_USER=$(docker image inspect --format '{{.Config.User}}' clinical-data-platform:ci)
+          test "$CONFIGURED_USER" = "10001:10001"
+          docker run --rm \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --pids-limit 256 \
+            --entrypoint sh \
+            clinical-data-platform:ci \
+            -ec 'test "$(id -u)" = "10001"; test "$(id -g)" = "10001"; test "$HOME" = "/home/clinical"; test "$XDG_CACHE_HOME" = "/tmp/.cache"; test "$XDG_CONFIG_HOME" = "/tmp/.config"; test "$(awk -F: '\''$3 == 10001 {print $7}'\'' /etc/passwd)" = "/usr/sbin/nologin"; test ! -w /app; test ! -w /opt/venv; test -w /tmp; touch /tmp/runtime-probe'
+
       - name: Smoke-test container contracts
-        run: docker run --rm clinical-data-platform:ci validate-contracts
+        run: >-
+          docker run --rm --read-only
+          --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777
+          --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 256
+          clinical-data-platform:ci validate-contracts
 
       - name: Smoke-test container Synthea profile
-        run: docker run --rm clinical-data-platform:ci synthea-profile
+        run: >-
+          docker run --rm --read-only
+          --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777
+          --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 256
+          clinical-data-platform:ci synthea-profile
 
       - name: Smoke-test container cohort profiles
         run: >-
-          docker run --rm --entrypoint clinical-data-cohort
+          docker run --rm --read-only
+          --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777
+          --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 256
+          --entrypoint clinical-data-cohort
           clinical-data-platform:ci list-profiles
 
       - name: Smoke-test container quality-report command
         run: >-
-          docker run --rm --entrypoint clinical-data-cohort
+          docker run --rm --read-only
+          --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777
+          --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 256
+          --entrypoint clinical-data-cohort
           clinical-data-platform:ci quality-report --help
 
       - name: Smoke-test packaged container migrations
         run: >-
-          docker run --rm --entrypoint python clinical-data-platform:ci
+          docker run --rm --read-only
+          --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777
+          --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 256
+          --entrypoint python clinical-data-platform:ci
           -c "from clinical_data_platform.migration import discover_migrations; print(len(discover_migrations()))"
 
-      - name: Smoke-test container raw capture
+      - name: Migrate and validate PostgreSQL from hardened container
         run: |
-          mkdir -p "$RUNNER_TEMP/container-raw"
+          docker run --rm --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777 \
+            --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 256 \
+            --network host --env DATABASE_URL="$DATABASE_URL" \
+            clinical-data-platform:ci database-migrate
+          docker run --rm --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777 \
+            --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 256 \
+            --network host --env DATABASE_URL="$DATABASE_URL" \
+            clinical-data-platform:ci database-validate
+
+      - name: Smoke-test container raw capture as UID 10001
+        run: |
+          RAW_BIND="$RUNNER_TEMP/container-raw"
+          mkdir -p "$RAW_BIND"
+          chmod 0777 "$RAW_BIND"
           docker run --rm \
-            --volume "$RUNNER_TEMP/container-raw:/tmp/raw" \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --pids-limit 256 \
+            --volume "$RAW_BIND:/app/data/raw" \
             --entrypoint python \
             clinical-data-platform:ci \
-            -c "from pathlib import Path; from clinical_data_platform.raw import capture_raw_source, verify_raw_receipt; receipt = capture_raw_source('patients', Path('/app/data/sample/patients.csv'), Path('/tmp/raw')); verify_raw_receipt(Path('/tmp/raw'), receipt.manifest_relative_path); print(receipt.sha256)"
+            -c "from pathlib import Path; from clinical_data_platform.raw import capture_raw_source, verify_raw_receipt; receipt = capture_raw_source('patients', Path('/app/data/sample/patients.csv'), Path('/app/data/raw')); verify_raw_receipt(Path('/app/data/raw'), receipt.manifest_relative_path); print(receipt.sha256)"
+          RECEIPT=$(find "$RAW_BIND" -type f -name '*.json' -print -quit)
+          test -n "$RECEIPT"
+          test "$(stat -c '%u' "$RECEIPT")" = "10001"
 
   python-compatibility:
     name: Compatibility (Python ${{ matrix.python-version }})
@@ -190,7 +247,7 @@ jobs:
         env:
           EXPECTED_PYTHON: ${{ matrix.python-version }}
         run: |
-          python -c "import importlib.metadata, os, platform; expected=os.environ['EXPECTED_PYTHON']; assert platform.python_version().startswith(expected + '.'); assert importlib.metadata.version('clinical-data-platform') == '0.19.0'; print(platform.python_version())"
+          python -c "import importlib.metadata, os, platform; expected=os.environ['EXPECTED_PYTHON']; assert platform.python_version().startswith(expected + '.'); assert importlib.metadata.version('clinical-data-platform') == '0.20.0'; print(platform.python_version())"
 
       - name: Validate contracts and cohort profiles
         run: |

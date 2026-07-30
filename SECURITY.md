@@ -27,11 +27,31 @@ The repository runs:
 - Bandit for Python static analysis against a narrow reviewed baseline;
 - CodeQL with the extended Python security query suite;
 - Trivy for high and critical vulnerabilities in the built container image;
-- Dependabot for Python, GitHub Actions, and Docker update proposals.
+- Dependabot for Python, GitHub Actions, and Docker update proposals;
+- hardened container smoke tests under a read-only root filesystem, dropped capabilities, `no-new-privileges`, and a constrained `/tmp` tmpfs.
 
 The dedicated GitHub Dependency Review Action is not used because Dependency Graph is not enabled for this repository. Pull requests are instead blocked when the complete resolved Python environment contains a known vulnerability. This audits the proposed head environment but does not provide a base-versus-head dependency diff.
 
 GitHub Actions are pinned to full commit SHAs and updated through reviewed pull requests.
+
+## Container runtime policy
+
+The application image declares the fixed runtime identity `10001:10001`. The associated `clinical` account uses `/usr/sbin/nologin`. The packaged application, virtual environment, sample files, and SQL are not writable by that identity.
+
+The supported hardened execution profile uses:
+
+```text
+read-only root filesystem
+all Linux capabilities dropped
+no-new-privileges enabled
+/tmp supplied as noexec,nosuid tmpfs
+PID limit of 256
+explicit writable volumes for raw, processed, and analytics outputs
+```
+
+CI verifies the configured image user, effective UID/GID, non-login shell, read-only application paths, PostgreSQL connectivity, and raw receipt ownership. Compose applies the same restrictions to the demo application service.
+
+These controls reduce the impact of a compromised application process. They do not create a complete sandbox and do not replace host security, network policy, secret management, image signing, runtime monitoring, or orchestrator-level policy.
 
 ## Reviewed Bandit baseline
 
@@ -44,4 +64,4 @@ The baseline suppresses only those recorded findings. New findings, changed loca
 
 ## Scope limits
 
-Passing automated scans does not prove absence of vulnerabilities. The controls do not establish regulatory compliance, production readiness, secure PHI handling, penetration-test coverage, or protection against unknown vulnerabilities and malicious dependencies.
+Passing automated scans and hardened container tests does not prove absence of vulnerabilities. The controls do not establish regulatory compliance, production readiness, secure PHI handling, penetration-test coverage, or protection against unknown vulnerabilities and malicious dependencies.

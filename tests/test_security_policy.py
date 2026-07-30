@@ -86,7 +86,7 @@ def test_container_runtime_has_no_package_manager_or_global_site_packages() -> N
 
     assert "FROM python:3.11-slim AS builder" in dockerfile
     assert "FROM python:3.11-slim AS runtime" in dockerfile
-    assert "COPY --from=builder /opt/venv /opt/venv" in dockerfile
+    assert "COPY --from=builder --chown=0:0 /opt/venv /opt/venv" in dockerfile
     assert 'PATH="/opt/venv/bin:$PATH"' in dockerfile
     assert "/opt/venv/bin/python -m pip uninstall -y" in dockerfile
     assert "/usr/local/lib/python3.11/ensurepip" in dockerfile

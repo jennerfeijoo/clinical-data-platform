@@ -21,11 +21,25 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-clinical_user}:${POSTGRES_PASSWORD:-clinical_password}@postgres:5432/${POSTGRES_DB:-clinical_data}
     volumes:
-      - ./data:/app/data
+      - app_raw:/app/data/raw
+      - app_processed:/app/data/processed
+      - app_analytics:/app/data/analytics
     command: ["run-demo", "--repository-root", "/app"]
 
 volumes:
   postgres_data:
+  app_raw:
+  app_processed:
+  app_analytics:

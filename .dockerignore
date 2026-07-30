@@ -7,5 +7,16 @@ __pycache__
 .ruff_cache
 .coverage
 htmlcov
-data/processed
-data/analytics
+
+tests
+docs
+scripts
+security
+
+*.log
+*.jsonl
+
+# The runtime image contains only the bundled synthetic demo inputs.
+data/**
+!data/sample/
+!data/sample/**
