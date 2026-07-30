@@ -1,9 +1,12 @@
-"""Setuptools build backend with deterministic gzip normalization for sdists."""
+"""Setuptools build backend with deterministic source-distribution normalization."""
 
 from __future__ import annotations
 
+import copy
 import gzip
+import io
 import os
+import tarfile
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -11,8 +14,35 @@ from typing import Any
 from setuptools import build_meta as _setuptools_backend
 
 
+def _canonical_tar_payload(tar_payload: bytes, source_date_epoch: int) -> bytes:
+    output = io.BytesIO()
+    try:
+        with tarfile.open(fileobj=io.BytesIO(tar_payload), mode="r:") as source:
+            members = sorted(source.getmembers(), key=lambda member: member.name)
+            with tarfile.open(
+                fileobj=output,
+                mode="w",
+                format=tarfile.PAX_FORMAT,
+            ) as target:
+                for member in members:
+                    canonical = copy.copy(member)
+                    canonical.mtime = source_date_epoch
+                    canonical.uid = 0
+                    canonical.gid = 0
+                    canonical.uname = ""
+                    canonical.gname = ""
+                    canonical.pax_headers = {}
+                    content = source.extractfile(member) if member.isfile() else None
+                    if member.isfile() and content is None:
+                        raise ValueError(f"Could not read TAR member: {member.name}")
+                    target.addfile(canonical, content)
+    except tarfile.TarError as error:
+        raise ValueError("Invalid TAR payload in source distribution.") from error
+    return output.getvalue()
+
+
 def normalize_sdist(path: Path, source_date_epoch: int) -> None:
-    """Rewrite one .tar.gz with a deterministic gzip header and payload."""
+    """Rewrite one .tar.gz with deterministic TAR and gzip metadata."""
     if source_date_epoch < 0:
         raise ValueError("SOURCE_DATE_EPOCH cannot be negative.")
     if not path.is_file() or not path.name.endswith(".tar.gz"):
@@ -22,6 +52,7 @@ def normalize_sdist(path: Path, source_date_epoch: int) -> None:
         tar_payload = gzip.decompress(path.read_bytes())
     except (OSError, EOFError) as error:
         raise ValueError(f"Invalid gzip source distribution: {path}") from error
+    canonical_payload = _canonical_tar_payload(tar_payload, source_date_epoch)
 
     temporary_path: Path | None = None
     try:
@@ -39,7 +70,7 @@ def normalize_sdist(path: Path, source_date_epoch: int) -> None:
                 fileobj=raw_file,
                 mtime=source_date_epoch,
             ) as gzip_file:
-                gzip_file.write(tar_payload)
+                gzip_file.write(canonical_payload)
             raw_file.flush()
             os.fsync(raw_file.fileno())
         temporary_path.replace(path)
@@ -52,7 +83,7 @@ def build_sdist(
     sdist_directory: str,
     config_settings: dict[str, Any] | None = None,
 ) -> str:
-    """Build an sdist and normalize its gzip timestamp when an epoch is supplied."""
+    """Build and canonically normalize an sdist when an epoch is supplied."""
     filename = _setuptools_backend.build_sdist(sdist_directory, config_settings)
     source_date_epoch = os.environ.get("SOURCE_DATE_EPOCH")
     if source_date_epoch is not None:
