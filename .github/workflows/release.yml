@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]*.[0-9]*.[0-9]*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.2.0
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install release toolchain
+        run: |
+          python -m pip install --upgrade pip "setuptools>=83"
+          python -m pip install ".[release]"
+          python -m pip check
+
+      - name: Resolve and validate tag identity
+        run: |
+          TAG="$GITHUB_REF_NAME"
+          VERSION="${TAG#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          python scripts/check_release.py \
+            --expected-version "$VERSION" \
+            --expected-tag "$TAG"
+
+      - name: Build reproducible wheel and source distribution
+        run: |
+          SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
+          export SOURCE_DATE_EPOCH
+          mkdir -p dist-a dist-b
+          python -m build --outdir dist-a
+          python -m build --outdir dist-b
+          diff -u \
+            <(cd dist-a && find . -maxdepth 1 -type f -printf '%f\n' | sort) \
+            <(cd dist-b && find . -maxdepth 1 -type f -printf '%f\n' | sort)
+          for artifact in dist-a/*; do
+            name=$(basename "$artifact")
+            cmp "$artifact" "dist-b/$name"
+          done
+
+      - name: Validate distribution metadata and contents
+        run: |
+          python -m twine check dist-a/*
+          python scripts/verify_distribution.py dist-a \
+            --expected-version "$VERSION" \
+            --manifest release-manifest.json \
+            --checksums SHA256SUMS
+
+      - name: Install and exercise the built wheel outside the repository
+        run: |
+          python -m venv "$RUNNER_TEMP/release-venv"
+          "$RUNNER_TEMP/release-venv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/release-venv/bin/python" -m pip install dist-a/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/release-venv/bin/python" -c "import importlib.metadata as m; assert m.version('clinical-data-platform') == '$VERSION'"
+          "$RUNNER_TEMP/release-venv/bin/clinical-data" validate-contracts
+          "$RUNNER_TEMP/release-venv/bin/clinical-data-cohort" list-profiles
+          "$RUNNER_TEMP/release-venv/bin/python" -c "from clinical_data_platform.cohort import load_hypertension_cohort_sql; sql, source = load_hypertension_cohort_sql(); assert 'INSERT INTO analytics.hypertension_features' in sql; assert source.startswith('clinical_data_platform.cohort_definitions:')"
+          "$RUNNER_TEMP/release-venv/bin/python" -c "from clinical_data_platform.migration import discover_migrations; assert len(discover_migrations()) == 8"
+
+      - name: Upload release evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ github.ref_name }}
+          path: |
+            dist-a
+            SHA256SUMS
+            release-manifest.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Create immutable GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist-a/* \
+            SHA256SUMS \
+            release-manifest.json \
+            --verify-tag \
+            --generate-notes \
+            --title "Clinical Data Platform $VERSION"
