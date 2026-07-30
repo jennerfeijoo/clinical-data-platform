@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.21.0
+
+- added a governed release gate that keeps package metadata, package `__version__`, CHANGELOG, CITATION metadata, README, tests, CI, and semantic release tags synchronized;
+- added deterministic wheel and source-distribution inspection, SHA-256 checksums, a machine-readable release manifest, and byte-for-byte double-build verification in GitHub Actions;
+- added clean virtual-environment installation from the built wheel outside the repository and exercised contracts, cohort profiles, migrations, entrypoints, and the packaged hypertension cohort definition;
+- packaged the default hypertension cohort SQL and the `py.typed` marker so installed wheels no longer rely on repository-relative runtime files;
+- added a tag-driven GitHub Release workflow with immutable artifact names and full-SHA-pinned Actions, while deliberately leaving PyPI publication disabled pending separate Trusted Publishing review;
+- added `CITATION.cff`, `CONTRIBUTING.md`, `SUPPORT.md`, a source-distribution manifest, documentation index, CLI reference, consolidated limitation register, release procedure, and Spanish release-engineering guide;
+- added release-toolchain dependency auditing and CI artifacts for pull-request inspection;
+- retained the synthetic-only, non-clinical, non-PHI boundary and kept stable `1.0.0` as a separately reviewed milestone.
+
 ## 0.20.0
 
 - changed the application image to the fixed non-root runtime identity `10001:10001` with a non-login account;
