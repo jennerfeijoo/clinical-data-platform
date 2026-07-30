@@ -11,6 +11,7 @@ The repository is synthetic-only. Nothing in these documents authorizes identifi
 - [CLI reference](cli-reference.md): command groups, required inputs, outputs, and destructive boundaries.
 - [Architecture](architecture.md): components, data flow, and trust boundaries.
 - [Database](database.md): schemas, migrations, lineage, and inspection queries.
+- [Repository file reference](repository-file-reference.md): interpretation rules and companion per-file PDF.
 - [Stable release readiness](stable-release-readiness.md): `1.0.0` compatibility surface, gates, and non-goals.
 - [Current limitations](limitations.md): unsupported claims and known engineering boundaries.
 
