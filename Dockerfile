@@ -5,7 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /build
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md build_backend.py ./
 COPY src ./src
 
 RUN python -m venv /opt/venv \
