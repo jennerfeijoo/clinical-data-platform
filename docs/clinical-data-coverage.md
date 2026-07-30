@@ -2,9 +2,9 @@
 
 ## Purpose
 
-This document defines what the current six-entity model represents, what it does not represent, and which additions are most valuable for a clinic pilot.
+This document defines what the current six-entity model represents, what it does not represent, and which technical extensions would broaden the platform.
 
-The model is intentionally compact. It supports reproducible clinical-data engineering demonstrations and bounded analytical pilots; it is not a complete electronic health record, FHIR implementation, OMOP warehouse, laboratory system, pharmacy system, or imaging archive.
+The model is intentionally compact. It supports reproducible clinical-data engineering demonstrations and analytical workflows; it is not a complete electronic health record, FHIR implementation, OMOP warehouse, laboratory system, pharmacy system, or imaging archive.
 
 ## Current data model
 
@@ -125,9 +125,9 @@ The contract represents a compact coded procedure event. It does not contain per
 | Physiological signals | Not implemented | Sampling, channels, calibration, artifacts, annotations |
 | Model predictions | Not implemented | Model version, input cohort, calibration, threshold, monitoring |
 
-## Minimum additions for a hypertension pilot
+## Hypertension reference analysis
 
-The current model can demonstrate a basic hypertension cohort, but a clinically useful quality pilot will commonly need:
+The current model can demonstrate a basic hypertension cohort. A more complete technical implementation would commonly require:
 
 1. practitioner, organization, service, and location context;
 2. broader vital-sign representation, including repeated measurements and measurement position or method when available;
@@ -138,9 +138,9 @@ The current model can demonstrate a basic hypertension cohort, but a clinically 
 7. problem status, onset, resolution, and primary/secondary diagnosis role;
 8. smoking status and selected social history;
 9. explicitly defined outcome and follow-up variables;
-10. clinic-approved pseudonymous identity linkage.
+10. approved pseudonymous identity linkage for controlled datasets.
 
-These fields should be added only when they support a stated pilot question.
+These fields should be added only when they support a defined analytical or engineering requirement.
 
 ## Priority order for extension
 
@@ -166,7 +166,7 @@ These fields should be added only when they support a stated pilot question.
 ### Priority 2: interoperability
 
 - FHIR import and export profiles;
-- HL7 v2 adapters where required by local systems;
+- HL7 v2 adapters where required by source systems;
 - complete terminology release lifecycle;
 - UCUM validation and conversion;
 - optional OMOP analytical export;
@@ -199,9 +199,9 @@ New domains should preserve the existing engineering guarantees:
 - tests and documentation;
 - explicit non-clinical claim boundary until separately validated.
 
-## Data discovery questions for a clinic
+## Source-integration questions
 
-Before implementation, determine:
+Before implementing a new source or domain, determine:
 
 - Which source systems produce each domain?
 - Are identifiers stable across systems and time?
@@ -213,8 +213,8 @@ Before implementation, determine:
 - Are corrections and deletions represented?
 - How are merged patient identities communicated?
 - How is schema change announced?
-- What is the clinically meaningful missingness denominator?
+- What is the meaningful missingness denominator?
 - Which outputs will be viewed by clinicians, analysts, or administrators?
 - Could any output influence individual care?
 
-The answers determine whether the pilot is technically and operationally defensible.
+The answers determine whether an extension is technically and operationally justified.
