@@ -10,6 +10,7 @@ The repository is synthetic-only. Nothing in these documents authorizes identifi
 - [CLI reference](cli-reference.md): command groups, required inputs, outputs, and destructive boundaries.
 - [Architecture](architecture.md): components, data flow, and trust boundaries.
 - [Database](database.md): schemas, migrations, lineage, and inspection queries.
+- [Stable release readiness](stable-release-readiness.md): `1.0.0` compatibility surface, gates, and non-goals.
 - [Current limitations](limitations.md): unsupported claims and known engineering boundaries.
 
 ## Data contracts and ingestion
@@ -40,6 +41,7 @@ The repository is synthetic-only. Nothing in these documents authorizes identifi
 - [Python compatibility](python-compatibility.md)
 - [Security scanning](security-scanning.md)
 - [Container hardening](container-hardening.md)
+- [Stable release readiness](stable-release-readiness.md)
 - [Release process](release-process.md)
 - [Contribution policy](../CONTRIBUTING.md)
 - [Support policy](../SUPPORT.md)

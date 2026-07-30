@@ -1,6 +1,6 @@
 # Clinical Data Platform
 
-> Status: release engineering validated toward `1.0.0` — version `0.21.0` adds governed wheel and source-distribution builds, clean-install verification, checksums, citation metadata, and tag-driven GitHub Releases.
+> Status: stable software release — version `1.0.0` provides governed synthetic clinical data engineering with reproducible artifacts, PostgreSQL-backed validation, mandatory quality gates, and an explicitly non-clinical scope.
 
 Clinical Data Platform is a synthetic clinical data engineering project demonstrating how healthcare-like CSV sources become auditable, terminology-linked, analysis-ready datasets.
 
@@ -50,16 +50,27 @@ python -m pip check
 A wheel produced by the release gate can be installed directly:
 
 ```bash
-python -m pip install clinical_data_platform-0.21.0-py3-none-any.whl
+python -m pip install clinical_data_platform-1.0.0-py3-none-any.whl
 clinical-data validate-contracts
 clinical-data-cohort list-profiles
 ```
 
-The project is not published to PyPI by the current workflow. Governed artifacts are designed for GitHub Releases until Trusted Publishing is configured and reviewed separately.
+The project is not published to PyPI by the current workflow. Governed artifacts are published as GitHub Release assets until Trusted Publishing is configured and reviewed separately.
+
+## Stable release scope
+
+Version `1.0.0` declares the package interface, executable contracts, migration chain, runtime resources, command-line entrypoints, and governed artifact process stable for the documented synthetic-data use case.
+
+“Stable” describes software maturity and compatibility policy. It does **not** mean the platform is validated for patient care, PHI, clinical decisions, regulated deployment, epidemiological inference, or production healthcare operations.
+
+The stable release contains no schema change beyond the already validated V001–V008 migration chain. Future backward-incompatible package, contract, CLI, or persisted-schema changes require a new major version.
+
+- [Stable release readiness](docs/stable-release-readiness.md)
+- [Current limitations](docs/limitations.md)
 
 ## Release engineering
 
-Version `0.21.0` introduces a formal artifact boundary:
+The governed artifact boundary is:
 
 ```text
 validated commit
@@ -80,11 +91,11 @@ The wheel contains the executable package and runtime resources, including contr
 Local release checks:
 
 ```bash
-python scripts/check_release.py --expected-version 0.21.0
+python scripts/check_release.py --expected-version 1.0.0
 python -m build --outdir dist
 python -m twine check dist/*
 python scripts/verify_distribution.py dist \
-  --expected-version 0.21.0 \
+  --expected-version 1.0.0 \
   --manifest release-manifest.json \
   --checksums SHA256SUMS
 ```
@@ -247,7 +258,7 @@ latest=8
 pending=[]
 ```
 
-Release engineering introduces no `V009` because it changes packaging, workflows, tests, documentation, and runtime resources rather than persistent database objects.
+The stable release introduces no `V009` because it changes versioning, documentation, tests, and release metadata rather than persistent database objects.
 
 ## Local synthetic demo
 
@@ -279,7 +290,8 @@ docker compose --profile demo up --build --abort-on-container-exit app
 - PostgreSQL-backed CPython 3.11–3.14 compatibility CI;
 - dependency, source, workflow, and container security scanning;
 - fixed non-root container identity and hardened runtime profile;
-- governed wheel and source-distribution builds, clean-install testing, checksums, citation metadata, and tag-driven GitHub Releases.
+- reproducible wheel and source-distribution builds, clean-install testing, checksums, citation metadata, and tag-driven GitHub Releases;
+- stable `1.0.0` compatibility contract for the documented synthetic-data workflow.
 
 ## Documentation
 
@@ -294,11 +306,12 @@ Use the [documentation index](docs/index.md) as the primary map. Key references:
 - [Clinical entities](docs/clinical-entities.md)
 - [Terminology](docs/terminology.md)
 - [Current limitations](docs/limitations.md)
+- [Stable release readiness](docs/stable-release-readiness.md)
 - [Release process](docs/release-process.md)
 
 ## Current limitations
 
-The remaining project milestone is the separately reviewed stable `1.0.0` release. Version `0.21.0` validates the release mechanism but does not create a stable release or publish to PyPI.
+Version `1.0.0` is stable for the documented synthetic clinical data engineering use case. It is not a claim of healthcare production readiness.
 
 The repository is not PHI-ready. The Synthea Java generator is not executed in normal CI. Contract validation still materializes complete source datasets. The two-cohort load is not one global transaction. Attrition is technical row exclusion, not participant follow-up. Missingness classification does not establish MCAR, MAR, or MNAR. The benchmark measures initial single-writer loading, not production capacity. Automated security tools, container hardening, and artifact checks do not replace clinical validation, threat modeling, penetration testing, secret management, deployment governance, or regulatory controls.
 

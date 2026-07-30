@@ -40,7 +40,7 @@ python -m mypy src
 python -m pytest
 python -m pip_audit --local --progress-spinner off
 python -m bandit -r src -ll -ii -b security/bandit-baseline.json
-python scripts/check_release.py --expected-version 0.21.0
+python scripts/check_release.py --expected-version 1.0.0
 ```
 
 The suite enforces at least 90% statement coverage. PostgreSQL integration tests require the configured disposable database.

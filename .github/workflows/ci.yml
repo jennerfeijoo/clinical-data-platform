@@ -247,7 +247,7 @@ jobs:
         env:
           EXPECTED_PYTHON: ${{ matrix.python-version }}
         run: |
-          python -c "import importlib.metadata, os, platform; expected=os.environ['EXPECTED_PYTHON']; assert platform.python_version().startswith(expected + '.'); assert importlib.metadata.version('clinical-data-platform') == '0.21.0'; print(platform.python_version())"
+          python -c "import importlib.metadata, os, platform; expected=os.environ['EXPECTED_PYTHON']; assert platform.python_version().startswith(expected + '.'); assert importlib.metadata.version('clinical-data-platform') == '1.0.0'; print(platform.python_version())"
 
       - name: Validate contracts and cohort profiles
         run: |
@@ -285,7 +285,7 @@ jobs:
           python -m pip check
 
       - name: Validate release metadata
-        run: python scripts/check_release.py --expected-version 0.21.0
+        run: python scripts/check_release.py --expected-version 1.0.0
 
       - name: Build artifacts twice and require byte identity
         run: |
@@ -306,7 +306,7 @@ jobs:
         run: |
           python -m twine check dist-a/*
           python scripts/verify_distribution.py dist-a \
-            --expected-version 0.21.0 \
+            --expected-version 1.0.0 \
             --manifest release-manifest.json \
             --checksums SHA256SUMS
 
@@ -317,7 +317,7 @@ jobs:
           "$RUNNER_TEMP/release-venv/bin/python" -m pip install --upgrade pip
           "$RUNNER_TEMP/release-venv/bin/python" -m pip install "$WHEEL"
           cd "$RUNNER_TEMP"
-          "$RUNNER_TEMP/release-venv/bin/python" -c "import importlib.metadata as m; assert m.version('clinical-data-platform') == '0.21.0'"
+          "$RUNNER_TEMP/release-venv/bin/python" -c "import importlib.metadata as m; assert m.version('clinical-data-platform') == '1.0.0'"
           "$RUNNER_TEMP/release-venv/bin/clinical-data" validate-contracts
           "$RUNNER_TEMP/release-venv/bin/clinical-data-cohort" list-profiles
           "$RUNNER_TEMP/release-venv/bin/python" -c "from clinical_data_platform.cohort import load_hypertension_cohort_sql; sql, source = load_hypertension_cohort_sql(); assert 'INSERT INTO analytics.hypertension_features' in sql; assert source.startswith('clinical_data_platform.cohort_definitions:')"
