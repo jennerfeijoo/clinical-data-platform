@@ -247,7 +247,7 @@ jobs:
         env:
           EXPECTED_PYTHON: ${{ matrix.python-version }}
         run: |
-          python -c "import importlib.metadata, os, platform; expected=os.environ['EXPECTED_PYTHON']; assert platform.python_version().startswith(expected + '.'); assert importlib.metadata.version('clinical-data-platform') == '0.20.0'; print(platform.python_version())"
+          python -c "import importlib.metadata, os, platform; expected=os.environ['EXPECTED_PYTHON']; assert platform.python_version().startswith(expected + '.'); assert importlib.metadata.version('clinical-data-platform') == '0.21.0'; print(platform.python_version())"
 
       - name: Validate contracts and cohort profiles
         run: |
@@ -261,3 +261,78 @@ jobs:
 
       - name: Run full suite with mandatory coverage
         run: python -m pytest
+
+  release-package:
+    name: Release package smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.2.0
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install release toolchain
+        run: |
+          python -m pip install --upgrade pip "setuptools>=83"
+          python -m pip install ".[release]"
+          python -m pip check
+
+      - name: Validate release metadata
+        run: python scripts/check_release.py --expected-version 0.21.0
+
+      - name: Build artifacts twice and require byte identity
+        run: |
+          SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
+          export SOURCE_DATE_EPOCH
+          mkdir -p dist-a dist-b
+          python -m build --outdir dist-a
+          python -m build --outdir dist-b
+          diff -u \
+            <(cd dist-a && find . -maxdepth 1 -type f -printf '%f\n' | sort) \
+            <(cd dist-b && find . -maxdepth 1 -type f -printf '%f\n' | sort)
+          for artifact in dist-a/*; do
+            name=$(basename "$artifact")
+            cmp "$artifact" "dist-b/$name"
+          done
+
+      - name: Verify distribution metadata and contents
+        run: |
+          python -m twine check dist-a/*
+          python scripts/verify_distribution.py dist-a \
+            --expected-version 0.21.0 \
+            --manifest release-manifest.json \
+            --checksums SHA256SUMS
+
+      - name: Install and exercise the wheel outside the repository
+        run: |
+          WHEEL=$(find "$GITHUB_WORKSPACE/dist-a" -maxdepth 1 -name '*.whl' -print -quit)
+          python -m venv "$RUNNER_TEMP/release-venv"
+          "$RUNNER_TEMP/release-venv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/release-venv/bin/python" -m pip install "$WHEEL"
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/release-venv/bin/python" -c "import importlib.metadata as m; assert m.version('clinical-data-platform') == '0.21.0'"
+          "$RUNNER_TEMP/release-venv/bin/clinical-data" validate-contracts
+          "$RUNNER_TEMP/release-venv/bin/clinical-data-cohort" list-profiles
+          "$RUNNER_TEMP/release-venv/bin/python" -c "from clinical_data_platform.cohort import load_hypertension_cohort_sql; sql, source = load_hypertension_cohort_sql(); assert 'INSERT INTO analytics.hypertension_features' in sql; assert source.startswith('clinical_data_platform.cohort_definitions:')"
+          "$RUNNER_TEMP/release-venv/bin/python" -c "from clinical_data_platform.migration import discover_migrations; assert len(discover_migrations()) == 8"
+
+      - name: Stage release evidence
+        run: |
+          mkdir -p release-evidence/dist
+          cp dist-a/* release-evidence/dist/
+          cp SHA256SUMS release-manifest.json release-evidence/
+
+      - name: Upload release-package evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-package-${{ github.sha }}
+          path: release-evidence
+          if-no-files-found: error
+          retention-days: 30
