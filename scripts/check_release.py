@@ -32,7 +32,9 @@ class ReleaseCheckError(RuntimeError):
 
 def _read(path: Path) -> str:
     if not path.is_file():
-        raise ReleaseCheckError(f"Required release file is missing: {path.relative_to(ROOT)}")
+        raise ReleaseCheckError(
+            f"Required release file is missing: {path.relative_to(ROOT)}"
+        )
     return path.read_text(encoding="utf-8")
 
 
@@ -44,6 +46,19 @@ def _single_match(pattern: str, text: str, label: str) -> str:
         )
     value = matches[0]
     return str(value)
+
+
+def _first_changelog_version(text: str) -> str:
+    versions = re.findall(
+        r"^##\s+([0-9]+\.[0-9]+\.[0-9]+)\s*$",
+        text,
+        flags=re.MULTILINE,
+    )
+    if not versions:
+        raise ReleaseCheckError("CHANGELOG.md has no semantic version heading.")
+    if len(versions) != len(set(versions)):
+        raise ReleaseCheckError("CHANGELOG.md contains duplicate version headings.")
+    return versions[0]
 
 
 def _citation_scalar(text: str, key: str) -> str:
@@ -59,13 +74,7 @@ def _version_sources(root: Path) -> dict[str, str]:
         _read(root / "src" / "clinical_data_platform" / "__init__.py"),
         "package __version__ assignment",
     )
-    changelog_version = _single_match(
-        r"^##\s+([0-9]+\.[0-9]+\.[0-9]+)\s*$",
-        _read(root / "CHANGELOG.md").split("\n## ", maxsplit=2)[0]
-        + "\n## "
-        + _read(root / "CHANGELOG.md").split("\n## ", maxsplit=2)[1],
-        "first changelog version",
-    )
+    changelog_version = _first_changelog_version(_read(root / "CHANGELOG.md"))
     citation_version = _citation_scalar(_read(root / "CITATION.cff"), "version")
     readme_version = _single_match(
         r"^> Status:.*version `([0-9]+\.[0-9]+\.[0-9]+)`.*$",
@@ -103,7 +112,10 @@ def _validate_release_extra(pyproject: dict[str, object]) -> tuple[str, ...]:
     release_dependencies = optional.get("release")
     if not isinstance(release_dependencies, list):
         raise ReleaseCheckError("The release optional dependency group is missing.")
-    names = tuple(str(item).split("<", maxsplit=1)[0].split(">", maxsplit=1)[0] for item in release_dependencies)
+    names = tuple(
+        str(item).split("<", maxsplit=1)[0].split(">", maxsplit=1)[0]
+        for item in release_dependencies
+    )
     if not any(name.startswith("build") for name in names):
         raise ReleaseCheckError("The release dependency group must include build.")
     if not any(name.startswith("twine") for name in names):
@@ -182,7 +194,7 @@ def validate_release(
 
     release_workflow = _read(root / ".github" / "workflows" / "release.yml")
     required_workflow_fragments = (
-        'tags: ["v[0-9]+.[0-9]+.[0-9]+"]',
+        'tags: ["v[0-9]*.[0-9]*.[0-9]*"]',
         "python scripts/check_release.py",
         "python -m build",
         "python -m twine check",
@@ -190,7 +202,9 @@ def validate_release(
         "gh release create",
     )
     missing_workflow = [
-        fragment for fragment in required_workflow_fragments if fragment not in release_workflow
+        fragment
+        for fragment in required_workflow_fragments
+        if fragment not in release_workflow
     ]
     if missing_workflow:
         raise ReleaseCheckError(
