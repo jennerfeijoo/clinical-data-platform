@@ -5,7 +5,7 @@ type: software
 authors:
   - family-names: "Feijoo"
     given-names: "Jenner"
-version: "0.21.0"
+version: "1.0.0"
 date-released: "2026-07-30"
 repository-code: "https://github.com/jennerfeijoo/clinical-data-platform"
 url: "https://github.com/jennerfeijoo/clinical-data-platform"
