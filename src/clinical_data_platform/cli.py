@@ -172,7 +172,8 @@ def build_parser() -> argparse.ArgumentParser:
     build_cohort.add_argument(
         "--sql",
         type=Path,
-        default=Path("sql/cohorts/hypertension.sql"),
+        default=None,
+        help="Optional reviewed SQL override; defaults to the packaged cohort definition.",
     )
     build_cohort.add_argument(
         "--output-dir",
