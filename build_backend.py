@@ -11,7 +11,11 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from setuptools import build_meta as _setuptools_backend
+
+def _setuptools_backend() -> Any:
+    from setuptools import build_meta
+
+    return build_meta
 
 
 def _canonical_tar_payload(tar_payload: bytes, source_date_epoch: int) -> bytes:
@@ -84,7 +88,7 @@ def build_sdist(
     config_settings: dict[str, Any] | None = None,
 ) -> str:
     """Build and canonically normalize an sdist when an epoch is supplied."""
-    filename = _setuptools_backend.build_sdist(sdist_directory, config_settings)
+    filename = _setuptools_backend().build_sdist(sdist_directory, config_settings)
     source_date_epoch = os.environ.get("SOURCE_DATE_EPOCH")
     if source_date_epoch is not None:
         try:
@@ -95,10 +99,63 @@ def build_sdist(
     return filename
 
 
-build_wheel = _setuptools_backend.build_wheel
-build_editable = _setuptools_backend.build_editable
-get_requires_for_build_wheel = _setuptools_backend.get_requires_for_build_wheel
-get_requires_for_build_sdist = _setuptools_backend.get_requires_for_build_sdist
-get_requires_for_build_editable = _setuptools_backend.get_requires_for_build_editable
-prepare_metadata_for_build_wheel = _setuptools_backend.prepare_metadata_for_build_wheel
-prepare_metadata_for_build_editable = _setuptools_backend.prepare_metadata_for_build_editable
+def build_wheel(
+    wheel_directory: str,
+    config_settings: dict[str, Any] | None = None,
+    metadata_directory: str | None = None,
+) -> str:
+    return _setuptools_backend().build_wheel(
+        wheel_directory,
+        config_settings,
+        metadata_directory,
+    )
+
+
+def build_editable(
+    wheel_directory: str,
+    config_settings: dict[str, Any] | None = None,
+    metadata_directory: str | None = None,
+) -> str:
+    return _setuptools_backend().build_editable(
+        wheel_directory,
+        config_settings,
+        metadata_directory,
+    )
+
+
+def get_requires_for_build_wheel(
+    config_settings: dict[str, Any] | None = None,
+) -> list[str]:
+    return list(_setuptools_backend().get_requires_for_build_wheel(config_settings))
+
+
+def get_requires_for_build_sdist(
+    config_settings: dict[str, Any] | None = None,
+) -> list[str]:
+    return list(_setuptools_backend().get_requires_for_build_sdist(config_settings))
+
+
+def get_requires_for_build_editable(
+    config_settings: dict[str, Any] | None = None,
+) -> list[str]:
+    return list(_setuptools_backend().get_requires_for_build_editable(config_settings))
+
+
+def prepare_metadata_for_build_wheel(
+    metadata_directory: str,
+    config_settings: dict[str, Any] | None = None,
+) -> str:
+    return _setuptools_backend().prepare_metadata_for_build_wheel(
+        metadata_directory,
+        config_settings,
+    )
+
+
+def prepare_metadata_for_build_editable(
+    metadata_directory: str,
+    config_settings: dict[str, Any] | None = None,
+) -> str:
+    return _setuptools_backend().prepare_metadata_for_build_editable(
+        metadata_directory,
+        config_settings,
+    )
