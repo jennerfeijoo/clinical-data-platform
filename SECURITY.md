@@ -2,7 +2,7 @@
 
 ## Supported version
 
-Security fixes are applied to the current `main` branch. The repository is under active development toward `1.0.0`; older pre-release snapshots are not maintained as separate supported release lines.
+Security fixes are applied to the current `main` branch. Version `1.0.0` is the current stable release; no separate long-term-support branch is maintained, and pre-1.0 snapshots are unsupported.
 
 ## Reporting a vulnerability
 

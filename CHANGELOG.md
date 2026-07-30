@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- added a clinic-pilot boundary, readiness checklist, data-coverage matrix, data-inventory template, and risk-register template;
+- added executable policy tests that preserve the synthetic-only, non-PHI, non-clinical pilot boundary;
+- corrected the stable security-support statement for version `1.0.0`;
+- added missing documentation-index entry points for executable contracts and immutable raw landing;
+- added a repository file-reference entry point and companion per-file documentation workflow;
+- retained the existing V001-V008 database schema and introduced no clinical model or runtime API change.
+
 ## 1.0.0
 
 - declared the first stable software release after validating the complete synthetic clinical data engineering workflow, executable contracts, immutable raw lineage, six-entity PostgreSQL model, terminology normalization, audited execution states, structured logging, reproducible Synthea cohorts, attrition and missingness evidence, bulk loading, and governed benchmarks;
