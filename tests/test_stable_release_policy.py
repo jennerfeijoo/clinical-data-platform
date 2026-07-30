@@ -25,7 +25,7 @@ def test_stable_release_metadata_and_boundaries() -> None:
     assert "does not establish" in readiness
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "stable software release `1.0.0`" in readme
+    assert "stable software release — version `1.0.0`" in readme
     assert "not a claim of healthcare production readiness" in readme
 
 
