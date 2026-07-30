@@ -1,6 +1,6 @@
 # Clinical Data Platform
 
-> Status: stable software release `1.0.0` — governed synthetic clinical data engineering with reproducible artifacts, PostgreSQL-backed validation, mandatory quality gates, and an explicitly non-clinical scope.
+> Status: stable software release — version `1.0.0` provides governed synthetic clinical data engineering with reproducible artifacts, PostgreSQL-backed validation, mandatory quality gates, and an explicitly non-clinical scope.
 
 Clinical Data Platform is a synthetic clinical data engineering project demonstrating how healthcare-like CSV sources become auditable, terminology-linked, analysis-ready datasets.
 
