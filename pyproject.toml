@@ -1,11 +1,12 @@
 [build-system]
 requires = ["setuptools>=83"]
-build-backend = "setuptools.build_meta"
+build-backend = "build_backend"
+backend-path = ["."]
 
 [project]
 name = "clinical-data-platform"
-version = "0.20.0"
-description = "An auditable synthetic clinical data platform with a hardened non-root container, security scanning, multi-version Python CI, mandatory behavioral test coverage, reproducible cohort quality reports, governed PostgreSQL loading, terminology normalization, and immutable lineage."
+version = "0.21.0"
+description = "An auditable synthetic clinical data platform with governed releases, a hardened non-root container, security scanning, multi-version Python CI, reproducible cohort quality evidence, PostgreSQL loading, terminology normalization, and immutable lineage."
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
 license = "MIT"
@@ -14,11 +15,16 @@ authors = [
 ]
 keywords = ["clinical-data", "data-engineering", "healthcare", "postgresql", "synthea"]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Typing :: Typed",
 ]
 dependencies = [
     "psycopg[binary]>=3.2,<4"
@@ -26,6 +32,10 @@ dependencies = [
 
 [project.urls]
 Repository = "https://github.com/jennerfeijoo/clinical-data-platform"
+Documentation = "https://github.com/jennerfeijoo/clinical-data-platform/tree/main/docs"
+Changelog = "https://github.com/jennerfeijoo/clinical-data-platform/blob/main/CHANGELOG.md"
+Issues = "https://github.com/jennerfeijoo/clinical-data-platform/issues"
+Security = "https://github.com/jennerfeijoo/clinical-data-platform/security/policy"
 
 [project.scripts]
 clinical-data = "clinical_data_platform.entrypoint:main"
@@ -43,12 +53,21 @@ security = [
     "bandit[toml]>=1.8,<2",
     "pip-audit>=2.10,<3",
 ]
+release = [
+    "build>=1.2,<2",
+    "twine>=6,<7",
+]
+
+[tool.setuptools]
+include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
+"clinical_data_platform" = ["py.typed"]
 "clinical_data_platform.contracts" = ["manifest.toml", "*/v*.toml"]
+"clinical_data_platform.cohort_definitions" = ["*.sql"]
 "clinical_data_platform.migrations" = ["V*.sql"]
 "clinical_data_platform.synthea_profiles" = ["*.toml"]
 

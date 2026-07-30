@@ -29,7 +29,7 @@ jobs:
       - name: Install project and audit tools
         run: |
           python -m pip install --upgrade pip "setuptools>=83"
-          python -m pip install -e ".[dev,security]"
+          python -m pip install -e ".[dev,security,release]"
           python -m pip check
 
       - name: Audit installed Python dependencies

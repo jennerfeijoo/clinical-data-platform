@@ -1,0 +1,22 @@
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+  categories:
+    - title: Breaking changes
+      labels:
+        - breaking-change
+    - title: Security and governance
+      labels:
+        - security
+        - governance
+    - title: Data platform and clinical model
+      labels:
+        - data-platform
+        - clinical-model
+    - title: Documentation and learning
+      labels:
+        - documentation
+    - title: Other changes
+      labels:
+        - "*"
